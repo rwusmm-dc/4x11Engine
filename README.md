@@ -154,6 +154,10 @@ Create `.4xs` script files with the following API:
 | X | Move camera down |
 | Right-click | Lock/unlock mouse for camera control |
 
+# Credits:
+https://github.com/ocornut/imgui
+https://github.com/luajit/luajit
+
 ## Technical Notes
 
 - **Culling**: Frustum culling with optional D3D11 occlusion queries
