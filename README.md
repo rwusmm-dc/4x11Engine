@@ -49,7 +49,8 @@ A lightweight game engine and editor supporting Direct3D 10 and 11, developed as
 
 1. Install **MinGW-w64** or **Visual Studio** with C++ support
 2. Ensure **DirectX SDK** or Windows SDK is installed
-3. Build with the provided script:
+3. Ensure you have DirectXMath installed in your TDM-GCC if you use that (https://github.com/rwusmm-dc/directx-examples/releases/download/dxmath/tdm-gcc-directxmathInstaller.exe)
+4. Build with the provided script:
 
 ```bash
 build.bat
