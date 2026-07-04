@@ -1,0 +1,33 @@
+-- 4xLang v0.1 - ServerService example script
+-- Creates a point light (if none exists) and moves it left/right smoothly
+
+-- Called every frame with delta time
+function update(dt)
+    -- Try to find an existing point light named "MovingLight"
+    local light = EntityService.findByName("MovingLight")
+
+    -- If it doesn't exist, create one
+    if light == nil then
+        light = LightService.createPoint("MovingLight")
+        if light then
+            -- Position it above the scene
+            light:setPosition({ x = 0, y = 3, z = 0 })
+            LightService.setColor(light, { r = 1.0, g = 0.5, b = 0.2 })
+            LightService.setIntensity(light, 2.0)
+            LightService.setRange(light, 8.0)
+            print("Created MovingLight at y=3")
+        end
+    end
+
+    -- Move the light left and right smoothly
+    if light then
+        local pos = light:getPosition()
+        if pos then
+            -- Use sine wave for smooth oscillation
+            local time = SyncService.getTime()
+            pos.x = math.sin(time * 0.8) * 4.0
+            light:setPosition(pos)
+        end
+    end
+end
+

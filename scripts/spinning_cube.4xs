@@ -1,0 +1,20 @@
+-- 4xLang v0.1 - Spinning Cube example
+-- Creates a cube entity and rotates it continuously
+
+function update(dt)
+    local cube = EntityService.findByName("SpinningCube")
+
+    if cube == nil then
+        cube = EntityService.create("SpinningCube")
+        if cube then
+            cube:setPosition({ x = 0, y = 1, z = 0 })
+            cube:setScale({ x = 1, y = 1, z = 1 })
+            print("Created SpinningCube")
+        end
+    end
+
+    if cube then
+        local time = SyncService.getTime()
+        cube:setRotation({ x = 0, y = time * 90, z = time * 45 })
+    end
+end
