@@ -1,0 +1,38 @@
+# Executable files
+*.exe
+*.exe~
+
+# Build output directories
+bin/
+obj/
+build/
+Debug/
+Release/
+x64/
+x86/
+
+# Compiled object files
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Visual Studio files
+*.sdf
+*.opensdf
+*.suo
+*.user
+*.vcxproj.user
+
+# MinGW/GCC
+*.a
+*.so
+*.dll
+*.dylib
+
+# Backup files
+*.bak
+*.tmp
+*.log
