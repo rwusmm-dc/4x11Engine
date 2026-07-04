@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <unordered_map>
+#include "SdkMeshLoader.h"
 #include <cstring>
 
 struct Vec3 { float x, y, z; };
@@ -156,3 +157,4 @@ bool LoadObj(const char* filename, ObjMesh& out)
     out.indexCount = (int)out.indices.size();
     return true;
 }
+ 

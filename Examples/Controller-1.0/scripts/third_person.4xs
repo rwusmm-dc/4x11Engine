@@ -1,0 +1,85 @@
+local player = nil
+local cam = nil
+local yaw = 0
+local pitch = -0.3
+local dist = 5
+local targetYaw = nil
+local velY = 0
+local gravity = -12
+local jumpSpeed = 5
+local groundY = 0
+local ready = false
+
+function setup()
+    player = EntityService.findByName("Player")
+    if not player then
+        player = EntityService.create("Player")
+    end
+
+    cam = EntityService.findByName("TPSCamera")
+    if not cam then
+        cam = CameraService.create("TPSCamera")
+    end
+    CameraService.setActive(cam)
+    player:setMass(0)
+    ready = true
+end
+
+function update(dt)
+    if not ready then setup(); if not ready then return end end
+
+    local dx, dy = Input.mouseDelta()
+    if math.abs(dx) < 1000 then yaw = yaw + dx * 0.003 end
+    if math.abs(dy) < 1000 then pitch = pitch + dy * 0.003 end
+    pitch = math.max(-1.3, math.min(1.3, pitch))
+
+    local sinY, cosY = math.sin(yaw), math.cos(yaw)
+    local sinP, cosP = math.sin(pitch), math.cos(pitch)
+
+    local cf = {x = -sinY, z = -cosY}
+    local cr = {x = cosY, z = -sinY}
+
+    local mx, mz = 0, 0
+    if Input.key("w") then mx = mx + cf.x; mz = mz + cf.z end
+    if Input.key("s") then mx = mx - cf.x; mz = mz - cf.z end
+    if Input.key("a") then mx = mx + cr.x; mz = mz + cr.z end
+    if Input.key("d") then mx = mx - cr.x; mz = mz - cr.z end
+
+    local speed = 5 * dt
+    if Input.key("shift") then speed = speed * 2 end
+    local len = math.sqrt(mx * mx + mz * mz)
+    if len > 0 then mx = mx / len * speed; mz = mz / len * speed end
+
+    local pos = player:getPosition()
+    local px, py, pz = pos.x, pos.y, pos.z
+    px = px + mx
+    pz = pz + mz
+
+    velY = velY + gravity * dt
+    if Input.key("space") and velY <= 0 and py <= groundY + 0.01 then
+        velY = jumpSpeed
+    end
+    py = py + velY * dt
+    if py <= groundY then
+        py = groundY
+        if velY < 0 then velY = 0 end
+    end
+    player:setPosition({x = px, y = py, z = pz})
+
+    if len > 0 then
+        local dir = math.atan2(mx, mz)
+        if targetYaw == nil then targetYaw = dir end
+        local d = dir - targetYaw
+        if d > math.pi then d = d - 2 * math.pi
+        elseif d < -math.pi then d = d + 2 * math.pi end
+        targetYaw = targetYaw + d * math.min(1, 8 * dt)
+        player:setRotation({x = 0, y = targetYaw, z = 0})
+    end
+
+    local cx = px + dist * sinY * cosP
+    local cy = py + 1.5 + dist * sinP
+    local cz = pz + dist * cosY * cosP
+
+    cam:setPosition({x = cx, y = cy, z = cz})
+    cam:lookAt({x = px, y = py + 1.2, z = pz})
+end

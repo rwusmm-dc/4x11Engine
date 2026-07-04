@@ -184,6 +184,49 @@ uint64_t g_EditingEntity = 0;
 static TextEditor g_Editor;
 static bool g_EditorTextChanged = false;
 
+static bool ImportSdkMeshToScene(Scene& scene)
+{
+    char path[MAX_PATH] = {};
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = Window::Handle();
+    ofn.lpstrFilter = "SDKMESH Files\0*.sdkmesh\0All Files\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    path[0] = '\0';
+    if (!GetOpenFileNameA(&ofn)) 
+        return false;
+
+    ObjMesh mesh;
+    if (!LoadSdkMeshAsObj(path, mesh)) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Failed to load SDKMESH:\n%s", path);
+        MessageBoxA(Window::Handle(), msg, "Error", MB_ICONERROR);
+        return false;
+    }
+
+    const char* nameStart = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '\\' || *p == '/') 
+            nameStart = p + 1;
+    }
+
+    std::string entityName(nameStart);
+    size_t dot = entityName.rfind('.');
+    if (dot != std::string::npos) 
+        entityName.resize(dot);
+    if (entityName.empty()) 
+        entityName = "ImportedSDK";
+
+    uint64_t id = scene.CreateEntity(entityName);
+    Entity* e = scene.FindEntity(id);
+    e->vertices = std::move(mesh.vertices);
+    e->indices = std::move(mesh.indices);
+    e->meshDirty = true;
+    return true;
+}
+
 // ── Helper: open file dialog for .4xs scripts ──
 static bool OpenScriptFileDialog(char* pathOut, int pathSize)
 {
@@ -459,6 +502,8 @@ void ShowHierarchyWindow(Scene& scene, uint64_t& selectedEntity, bool& deselect)
         }
     }
 
+    
+
     // Deselect when clicking empty space in the hierarchy window
     if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()) {
         selectedEntity = 0;
@@ -587,6 +632,18 @@ void ShowHierarchyWindow(Scene& scene, uint64_t& selectedEntity, bool& deselect)
             }
             ImGui::EndMenu();
         }
+
+        if (ImGui::MenuItem("Import SDKMESH")) {
+    if (ImportSdkMeshToScene(scene)) {
+        auto& all = scene.All();
+        if (!all.empty()) {
+            scene.ClearRedo();
+            scene.PushUndo(UndoEntry::Removed, all.back());
+            selectedEntity = all.back().id;
+        }
+    }
+}
+
         if (ImGui::MenuItem("Import OBJ")) {
             if (ImportOBJToScene(scene)) {
                 auto& all = scene.All();

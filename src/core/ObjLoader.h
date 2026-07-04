@@ -10,3 +10,4 @@ struct ObjMesh {
 };
 
 bool LoadObj(const char* filename, ObjMesh& out);
+bool LoadSdkMeshAsObj(const char* filename, ObjMesh& out);

@@ -39,6 +39,16 @@ echo === [GAME] Compiling src/core/FPSCamera.cpp ===
 if errorlevel 1 exit /b 1
 set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_FPSCamera.o"
 
+echo === [GAME] Compiling src/core/ObjLoader.cpp ===
+"%GCC%" %CFLAGS% -c src/core/ObjLoader.cpp %INCS% -o "%OUTPUT%\g_ObjLoader.o"
+if errorlevel 1 exit /b 1
+set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_ObjLoader.o"
+
+echo === [GAME] Compiling src/core/SdkMeshLoader.cpp ===
+"%GCC%" %CFLAGS% -c src/core/SdkMeshLoader.cpp %INCS% -o "%OUTPUT%\g_SdkMeshLoader.o"
+if errorlevel 1 exit /b 1
+set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_SdkMeshLoader.o"
+
 echo === [GAME] Compiling src/core/CullingSystem.cpp ===
 "%GCC%" %CFLAGS% -c src/core/CullingSystem.cpp %INCS% -o "%OUTPUT%\g_CullingSystem.o"
 if errorlevel 1 exit /b 1

@@ -26,6 +26,7 @@ if exist src\core\CullingSystem.o del src\core\CullingSystem.o
 if exist src\core\Project.o       del src\core\Project.o
 if exist src\io\Archive.o          del src\io\Archive.o
 if exist src\script\ScriptEngine.o del src\script\ScriptEngine.o
+if exist src\core\SdkMeshLoader.o del src\core\SdkMeshLoader.o
 
 echo === Compiling src/io/Archive.cpp ===
 "%GCC%" %CFLAGS% -c src/io/Archive.cpp %INCS% -o src\io\Archive.o
@@ -61,6 +62,11 @@ echo === Compiling src/core/ObjLoader.cpp ===
 "%GCC%" %CFLAGS% -c src/core/ObjLoader.cpp %INCS% -o src\core\ObjLoader.o
 if errorlevel 1 exit /b 1
 set "OBJS=%OBJS% src\core\ObjLoader.o"
+
+echo === Compiling src/core/SdkMeshLoader.cpp ===
+"%GCC%" %CFLAGS% -c src/core/SdkMeshLoader.cpp %INCS% -o src\core\SdkMeshLoader.o
+if errorlevel 1 exit /b 1
+set "OBJS=%OBJS% src\core\SdkMeshLoader.o"
 
 echo === Compiling src/core/CullingSystem.cpp ===
 "%GCC%" %CFLAGS% -c src/core/CullingSystem.cpp %INCS% -o src\core\CullingSystem.o
@@ -149,8 +155,6 @@ if not exist libzstd.dll (
 ) else (
     echo libzstd.dll already present
 )
-
-
 
 goto :eof
 

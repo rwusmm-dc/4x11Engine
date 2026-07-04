@@ -1,0 +1,23 @@
+-- 4xLang v0.1 - Pulse Effect example
+-- Creates a light that pulses in intensity
+
+function update(dt)
+    local light = EntityService.findByName("PulseLight")
+
+    if light == nil then
+        light = LightService.createPoint("PulseLight")
+        if light then
+            light:setPosition({ x = 2, y = 2, z = 2 })
+            LightService.setColor(light, { r = 1.0, g = 0.2, b = 0.2 })
+            LightService.setRange(light, 6.0)
+            print("Created PulseLight")
+        end
+    end
+
+    if light then
+        local time = SyncService.getTime()
+        local intensity = 1.0 + math.sin(time * 3.0) * 1.5
+        LightService.setIntensity(light, intensity)
+    end
+end
+
