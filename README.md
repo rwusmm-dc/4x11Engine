@@ -19,7 +19,7 @@ A lightweight game engine and editor supporting Direct3D 10 and 11, developed as
 ## Project Structure
 
 ```
-4xEngine/
+4xEngine/src/
 ├── core/
 │   ├── ComPtr.h           - Smart COM pointer wrapper
 │   ├── CullingSystem.*    - Frustum and occlusion culling
