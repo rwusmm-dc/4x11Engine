@@ -9,12 +9,12 @@ A lightweight game engine and editor supporting Direct3D 10 and 11, developed as
 - **C++ core** with minimal dependencies
 - **Direct3D 10/11 support** with runtime backend selection
 - **Built-in editor** with scene hierarchy, property inspector, and gizmo manipulation
-- **Physically-based physics simulation** with collision detection and response
-- **Frustum and occlusion culling** for performance optimization
-- **Scripting support** via Lua (4xLang)
-- **OBJ model import** and scene serialization (GAF format)
-- **Time-of-day sky system** with dynamic lighting
-- **Entity Component System** architecture
+- **Bullet physics** 4xPhys (Version v0.2)
+- **Frustum culling**
+- **Scripting support** via LuaJIT (4xLang)
+- **OBJ/SDKMESH loader**
+- **Dynamic sky** Allows creating and customizing your own sky shader (experimental).
+- **Entity Component System (ECS)** architecture
 
 ## Project Structure
 
