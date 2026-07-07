@@ -69,7 +69,6 @@ void ClearConsole() {
     g_ConsoleLog.clear();
 }
 
-// --- SyncService v0.1 ---
 static int lua_ss_sleep(lua_State* L) {
     double ms = luaL_checknumber(L, 1);
     if (ms > 0) {
@@ -109,7 +108,6 @@ static int lua_ss_getDiagnostics(lua_State* L) {
     return 1;
 }
 
-// --- InputService v0.1 ---
 static int lua_is_key(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     if (!name || !name[0]) { lua_pushboolean(L, 0); return 1; }
@@ -159,7 +157,6 @@ static int lua_is_mouseDelta(lua_State* L) {
     return 2;
 }
 
-// --- EntityService v0.1 ---
 static int lua_es_findByName(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     Scene* sc = nullptr;
@@ -244,7 +241,6 @@ static Entity* CheckEntity(lua_State* L, int index) {
     return sc->FindEntity(*idPtr);
 }
 
-// --- Entity object methods ---
 static int lua_entity_getPos(lua_State* L) {
     Entity* e = CheckEntity(L, 1);
     if (!e) { lua_pushnil(L); return 1; }
@@ -365,7 +361,6 @@ static int lua_entity_isCamera(lua_State* L) {
     return 1;
 }
 
-// --- Physics entity methods ---
 static int lua_entity_getVelocity(lua_State* L) {
     Entity* e = CheckEntity(L, 1);
     if (!e) { lua_pushnil(L); return 1; }
@@ -436,7 +431,6 @@ static int lua_entity_isStatic(lua_State* L) {
     return 1;
 }
 
-// --- LightService v0.1 ---
 static int lua_ls_setColor(lua_State* L) {
     Entity* e = CheckEntity(L, 1);
     if (!e || !e->HasFlag(ENTITY_LIGHT)) return 0;
@@ -507,7 +501,6 @@ static int lua_ls_createDirectional(lua_State* L) {
     return 1;
 }
 
-// --- CameraService v0.1 ---
 static int lua_cs_getActive(lua_State* L) {
     Scene* sc = nullptr;
     lua_getfield(L, LUA_REGISTRYINDEX, "_4xScene");
@@ -558,7 +551,6 @@ static int lua_cs_create(lua_State* L) {
     return 1;
 }
 
-// --- WorldService helpers ---
 static Entity* GetWorldEnv(lua_State* L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "_4xScene");
     Scene* sc = lua_islightuserdata(L, -1) ? (Scene*)lua_touserdata(L, -1) : nullptr;
@@ -597,7 +589,6 @@ static int lua_ws_getSunBrightness(lua_State* L) {
     return 1;
 }
 
-// --- Entity userdata metatable ---
 static const luaL_Reg entity_methods[] = {
     {"getPosition", lua_entity_getPos},
     {"setPosition", lua_entity_setPos},
@@ -631,7 +622,6 @@ int ScriptEngine::PushEntity(lua_State* L, Entity* e) {
     return 1;
 }
 
-// --- ScriptEngine implementation ---
 ScriptEngine::ScriptEngine() {
     g_ScriptEngine = this;
 }

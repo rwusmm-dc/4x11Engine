@@ -1,3 +1,7 @@
+// ImGui ID stack notes:
+// - Every PushID() needs a matching PopID() - no early returns/continues between them.
+// - TreeNodeEx() with Leaf|NoTreePushOnOpen does NOT push; do NOT call TreePop() for it.
+// - TreeNodeEx() without that flag pushes only when node is open; call TreePop() only in that case.
 #include <algorithm>
 #include <chrono>
 #include <string>
@@ -138,7 +142,7 @@ TextEditor::Coordinates TextEditor::SanitizeCoordinates(const Coordinates & aVal
 }
 
 // https://en.wikipedia.org/wiki/UTF-8
-// We assume that the char is a standalone character (<128) or a leading byte of an UTF-8 code sequence (non-10xxxxxx code)
+// The char is a standalone character (<128) or a leading byte of an UTF-8 code sequence (non-10xxxxxx code)
 static int UTF8CharLength(TextEditor::Char c)
 {
 	if ((c & 0xFE) == 0xFC)
@@ -2003,7 +2007,7 @@ const TextEditor::Palette & TextEditor::GetRetroBluePalette()
 {
 	const static Palette p = { {
 			0xff00ffff,	// None
-			0xffffff00,	// Keyword	
+			0xffffff00,	// Keyword
 			0xff00ff00,	// Number
 			0xff808000,	// String
 			0xff808000, // Char literal

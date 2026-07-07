@@ -2,10 +2,12 @@
 #include <DirectXMath.h>
 #include <string>
 #include <vector>
+#include <unordered_set>
+#include <unordered_map>
 #include <cstdint>
 #include <cstdio>
 #include <windows.h>
-#include "phy/Physics.h"
+#include "phy/4xPhys.h"
 
 static constexpr int VERTEX_STRIDE = 9; // pos(3) + normal(3) + color(3) per vertex
 
@@ -15,6 +17,7 @@ enum EntityFlag : uint32_t {
     ENTITY_WORLD_ENV     = 1 << 2,
     ENTITY_SCRIPT        = 1 << 3,
     ENTITY_SERVER_SERVICE = 1 << 4,
+    ENTITY_MODEL         = 1 << 5,
 };
 
 struct TransformComponent {
@@ -75,11 +78,13 @@ struct Entity {
     CameraComponent camera;
     WorldEnvironmentComponent worldEnv;
     std::vector<float> vertices;
+    std::vector<float> collisionVertices; // convex hull vertices (same stride 9 format) for physics
     std::vector<uint32_t> indices;
+    bool instancingEnabled = true;
     bool meshDirty = true;
     uint32_t flags = 0;
     uint64_t parentId = 0;           // 0 = root, non-zero = child of parent
-    std::string scriptPath;          // .4xs file path for script entities
+    std::string scriptPath;          // .scr/.4xs file path for script entities
     int scriptHandle = -1;           // handle into ScriptEngine (-1 = not loaded)
 
     Entity(uint64_t id, const std::string& name) : id(id), name(name) {}
@@ -100,7 +105,6 @@ uint64_t CreateTriangleEntity(Scene& scene);
 uint64_t CreateOctagonEntity(Scene& scene);
 uint64_t CreateSnowmanEntity(Scene& scene);
 
-// --- GAF archive (scene serialization) ---
 #pragma pack(push, 1)
 struct GAFHeader {
     char magic[4] = { 'G', 'A', 'F', '2' };
@@ -120,7 +124,7 @@ bool LoadEntitiesFromArchive(GameArchive& archive, std::vector<Entity>& entities
 bool ExportArchive(const char* outputDir, const std::vector<Entity>& entities);
 
 struct UndoEntry {
-    enum Type { Added, Removed };
+    enum Type { Added, Removed, Modified };
     Type type;
     Entity entity;
     UndoEntry() : type(Added), entity(0, "") {}
@@ -156,27 +160,21 @@ public:
 
     // Fix duplicate IDs and recalculate m_NextId (call after loading entities)
     void DeduplicateIds() {
-        std::vector<uint64_t> remap;
-        for (size_t i = 0; i < m_Entities.size(); i++) {
-            bool dup = false;
-            for (size_t j = 0; j < i; j++) {
-                if (m_Entities[j].id == m_Entities[i].id) { dup = true; break; }
-            }
-            if (dup) {
-                uint64_t oldId = m_Entities[i].id;
+        std::unordered_set<uint64_t> seen;
+        std::unordered_map<uint64_t, uint64_t> remap;
+        for (auto& e : m_Entities) {
+            if (!seen.insert(e.id).second) {
+                uint64_t oldId = e.id;
                 uint64_t newId = m_NextId++;
-                m_Entities[i].id = newId;
-                remap.push_back(oldId);
-                remap.push_back(newId);
+                e.id = newId;
+                remap[oldId] = newId;
             }
         }
         if (!remap.empty()) {
             for (auto& e : m_Entities) {
-                for (size_t r = 0; r < remap.size(); r += 2) {
-                    if (e.parentId == remap[r]) {
-                        e.parentId = remap[r + 1];
-                    }
-                }
+                auto it = remap.find(e.parentId);
+                if (it != remap.end())
+                    e.parentId = it->second;
             }
         }
         for (auto& e : m_Entities)

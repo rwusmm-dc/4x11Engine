@@ -1,3 +1,7 @@
+// ImGui ID stack notes:
+// - Every PushID() needs a matching PopID() - no early returns/continues between them.
+// - TreeNodeEx() with Leaf|NoTreePushOnOpen does NOT push; do NOT call TreePop() for it.
+// - TreeNodeEx() without that flag pushes only when node is open; call TreePop() only in that case.
 #include "Overlay.h"
 #include "ProjectManagerUI.h"
 #include "core/Window.h"
@@ -6,9 +10,11 @@
 #include "ecs/ECS.h"
 #include "script/ScriptEngine.h"
 #include "CodeEditor.h"
+#include "phy/4xPhys.h"
 
 #include "d3d10/Device.h"
 #include "d3d10/Pipeline.h"
+#include "d3d10/skybox.h"
 #include "d3d11/Device.h"
 #include "d3d11/Pipeline.h"
 #include "d3d11/skybox.h"
@@ -29,6 +35,73 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+
+// ── imguitheme.ini loader ──
+static const char* g_ColorNames[] = {
+    "Text", "TextDisabled", "WindowBg", "ChildBg", "PopupBg",
+    "Border", "BorderShadow", "FrameBg", "FrameBgHovered", "FrameBgActive",
+    "TitleBg", "TitleBgActive", "TitleBgCollapsed", "MenuBarBg", "ScrollbarBg",
+    "ScrollbarGrab", "ScrollbarGrabHovered", "ScrollbarGrabActive",
+    "CheckMark", "CheckboxSelectedBg", "SliderGrab", "SliderGrabActive",
+    "Button", "ButtonHovered", "ButtonActive",
+    "Header", "HeaderHovered", "HeaderActive",
+    "Separator", "SeparatorHovered", "SeparatorActive",
+    "ResizeGrip", "ResizeGripHovered", "ResizeGripActive",
+    "InputTextCursor",
+    "TabHovered", "Tab", "TabSelected", "TabSelectedOverline",
+    "TabDimmed", "TabDimmedSelected", "TabDimmedSelectedOverline",
+    "PlotLines", "PlotLinesHovered", "PlotHistogram", "PlotHistogramHovered",
+    "TableHeaderBg", "TableBorderStrong", "TableBorderLight",
+    "TableRowBg", "TableRowBgAlt",
+    "TextLink", "TextSelectedBg", "TreeLines",
+    "DragDropTarget", "DragDropTargetBg", "UnsavedMarker",
+    "NavCursor", "NavWindowingHighlight", "NavWindowingDimBg", "ModalWindowDimBg",
+};
+
+static void ApplyThemeFromINI()
+{
+    std::ifstream f("imguitheme.ini");
+    if (!f.is_open()) {
+        ImGui::StyleColorsDark();
+        return;
+    }
+
+    ImGui::StyleColorsDark();
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '[' || line[0] == ';' || line[0] == '#')
+            continue;
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string name = line.substr(0, eq);
+        std::string val  = line.substr(eq + 1);
+        name.erase(0, name.find_first_not_of(" \t\r"));
+        name.erase(name.find_last_not_of(" \t\r") + 1);
+        val.erase(0, val.find_first_not_of(" \t\r"));
+        val.erase(val.find_last_not_of(" \t\r") + 1);
+
+        for (int i = 0; i < ImGuiCol_COUNT; i++) {
+            if (name == g_ColorNames[i]) {
+                float r, g, b, a;
+                if (sscanf(val.c_str(), "%f %f %f %f", &r, &g, &b, &a) == 4)
+                    ImGui::GetStyle().Colors[i] = ImVec4(r, g, b, a);
+                break;
+            }
+        }
+    }
+}
+
+static void SaveThemeToINI()
+{
+    std::ofstream f("imguitheme.ini");
+    if (!f.is_open()) return;
+    f << "[Colors]\n";
+    for (int i = 0; i < ImGuiCol_COUNT; i++) {
+        ImVec4 c = ImGui::GetStyle().Colors[i];
+        f << g_ColorNames[i] << " = " << c.x << " " << c.y << " " << c.z << " " << c.w << "\n";
+    }
+    f.close();
+}
 
 namespace {
 
@@ -166,6 +239,7 @@ static bool ImportOBJToScene(Scene& scene)
     e->vertices = std::move(mesh.vertices);
     e->indices  = std::move(mesh.indices);
     e->meshDirty = true;
+    PhysWorld4X::BuildCollisionMesh(e->vertices, e->collisionVertices, path);
     return true;
 }
 
@@ -195,7 +269,7 @@ static bool ImportSdkMeshToScene(Scene& scene)
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
     path[0] = '\0';
-    if (!GetOpenFileNameA(&ofn)) 
+    if (!GetOpenFileNameA(&ofn))
         return false;
 
     ObjMesh mesh;
@@ -208,15 +282,15 @@ static bool ImportSdkMeshToScene(Scene& scene)
 
     const char* nameStart = path;
     for (const char* p = path; *p; p++) {
-        if (*p == '\\' || *p == '/') 
+        if (*p == '\\' || *p == '/')
             nameStart = p + 1;
     }
 
     std::string entityName(nameStart);
     size_t dot = entityName.rfind('.');
-    if (dot != std::string::npos) 
+    if (dot != std::string::npos)
         entityName.resize(dot);
-    if (entityName.empty()) 
+    if (entityName.empty())
         entityName = "ImportedSDK";
 
     uint64_t id = scene.CreateEntity(entityName);
@@ -224,16 +298,17 @@ static bool ImportSdkMeshToScene(Scene& scene)
     e->vertices = std::move(mesh.vertices);
     e->indices = std::move(mesh.indices);
     e->meshDirty = true;
+    PhysWorld4X::BuildCollisionMesh(e->vertices, e->collisionVertices, path);
     return true;
 }
 
-// ── Helper: open file dialog for .4xs scripts ──
+// ── Helper: open file dialog for .scr / .4xs scripts ──
 static bool OpenScriptFileDialog(char* pathOut, int pathSize)
 {
     OPENFILENAMEA ofn = {};
     ofn.lStructSize     = sizeof(ofn);
     ofn.hwndOwner       = Window::Handle();
-    ofn.lpstrFilter     = "4xLang Scripts\0*.4xs\0All Files\0*.*\0";
+    ofn.lpstrFilter     = "4xLang Scripts\0*.scr;*.4xs\0All Files\0*.*\0";
     ofn.lpstrFile       = pathOut;
     ofn.nMaxFile        = pathSize;
     ofn.Flags           = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
@@ -268,18 +343,22 @@ static bool WriteStringToFile(const std::string& path, const std::string& conten
     return true;
 }
 
-// ── Helper: recursively render entity hierarchy ──
+static bool EntityNameLess(const Entity* a, const Entity* b) {
+    return a->name < b->name;
+}
+
+// ── Helper: recursively render entity hierarchy (with auto-sort) ──
 static void RenderEntityTree(Scene& scene, Entity& entity, uint64_t& selectedEntity)
 {
     ImGui::PushID(&entity);
 
-    bool hasChildren = false;
-    for (auto& e : scene.All()) {
-        if (e.parentId == entity.id && e.id != entity.id) {
-            hasChildren = true;
-            break;
-        }
-    }
+    // Collect children (sorted)
+    std::vector<Entity*> children;
+    for (auto& e : scene.All())
+        if (e.parentId == entity.id && e.id != entity.id)
+            children.push_back(&e);
+    std::sort(children.begin(), children.end(), EntityNameLess);
+    bool hasChildren = !children.empty();
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
     if (!hasChildren)
@@ -294,6 +373,8 @@ static void RenderEntityTree(Scene& scene, Entity& entity, uint64_t& selectedEnt
         label = "[Srv] " + entity.name;
     } else if (entity.HasFlag(ENTITY_SCRIPT)) {
         label = "[Scr] " + entity.name;
+    } else if (entity.HasFlag(ENTITY_MODEL)) {
+        label = "[Mdl] " + entity.name;
     } else if (entity.HasFlag(ENTITY_LIGHT)) {
         label = (entity.light.type == LightType::Directional) ? "[Dir] " : "[Pnt] ";
         label += entity.name;
@@ -309,19 +390,18 @@ static void RenderEntityTree(Scene& scene, Entity& entity, uint64_t& selectedEnt
     }
 
     // Dragging support: drag source
-    if (ImGui::BeginDragDropSource()) {
+    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
         ImGui::SetDragDropPayload("ENTITY_NODE", &entity.id, sizeof(uint64_t));
         ImGui::Text("%s", label.c_str());
         ImGui::EndDragDropSource();
     }
 
-    // Drop target: reparent
-    if (ImGui::BeginDragDropTarget()) {
+    // Drop target: reparent (Models, regular entities, root space)
+    bool canDrop = !entity.HasFlag(ENTITY_LIGHT) && !entity.HasFlag(ENTITY_CAMERA)
+                   && !entity.HasFlag(ENTITY_WORLD_ENV);
+    if (canDrop && ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY_NODE")) {
             uint64_t dragId = *(const uint64_t*)payload->Data;
-            // Don't allow dropping on lights, cameras, or scripts directly
-            // Allow dropping on ServerService (accepts scripts), or regular entities (accepts scripts)
-            // Reparent the dragged entity
             if (dragId != entity.id) {
                 scene.ReparentEntity(dragId, entity.id);
             }
@@ -330,11 +410,8 @@ static void RenderEntityTree(Scene& scene, Entity& entity, uint64_t& selectedEnt
     }
 
     if (open && hasChildren) {
-        for (auto& e : scene.All()) {
-            if (e.parentId == entity.id && e.id != entity.id) {
-                RenderEntityTree(scene, e, selectedEntity);
-            }
-        }
+        for (auto* child : children)
+            RenderEntityTree(scene, *child, selectedEntity);
         ImGui::TreePop();
     }
 
@@ -351,7 +428,7 @@ bool Init(HWND hwnd, void* device, void* context, GfxBackend backend)
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    ImGui::StyleColorsDark();
+    ApplyThemeFromINI();
 
     if (!ImGui_ImplWin32_Init(hwnd)) return false;
 
@@ -439,8 +516,8 @@ void BeginFrame()
 
 void ShowPerformanceWindow(GfxBackend backend, int culledTotal, int culledVisible)
 {
-    ImGui::SetNextWindowPos(ImVec2(8, 17), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(361, 310), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(3, 33), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(351, 246), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.65f);
     ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_NoCollapse);
 
@@ -482,7 +559,7 @@ void ShowPerformanceWindow(GfxBackend backend, int culledTotal, int culledVisibl
 
 void ShowHierarchyWindow(Scene& scene, uint64_t& selectedEntity, bool& deselect)
 {
-    ImGui::SetNextWindowPos(ImVec2(1017, 7), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(1102, 22), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(255, 244), ImGuiCond_FirstUseEver);
     ImGui::Begin("Scene Hierarchy", nullptr);
 
@@ -495,14 +572,15 @@ void ShowHierarchyWindow(Scene& scene, uint64_t& selectedEntity, bool& deselect)
         ImGui::EndDragDropTarget();
     }
 
-    // Entity tree: only render root entities (parentId == 0)
-    for (auto& e : scene.All()) {
-        if (e.parentId == 0) {
-            RenderEntityTree(scene, e, selectedEntity);
-        }
-    }
+    // Entity tree: auto-sort by name, render root entities (parentId == 0)
+    std::vector<Entity*> sorted;
+    for (auto& e : scene.All())
+        if (e.parentId == 0)
+            sorted.push_back(&e);
+    std::sort(sorted.begin(), sorted.end(), EntityNameLess);
+    for (auto* e : sorted)
+        RenderEntityTree(scene, *e, selectedEntity);
 
-    
 
     // Deselect when clicking empty space in the hierarchy window
     if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()) {
@@ -605,6 +683,15 @@ void ShowHierarchyWindow(Scene& scene, uint64_t& selectedEntity, bool& deselect)
                 scene.PushUndo(UndoEntry::Removed, *e);
                 selectedEntity = newId;
             }
+            if (ImGui::MenuItem("Model (Group)")) {
+                uint64_t newId = scene.CreateEntity("Model");
+                Entity* e = scene.FindEntity(newId);
+                e->SetFlag(ENTITY_MODEL);
+                scene.ClearRedo();
+                scene.PushUndo(UndoEntry::Removed, *e);
+                selectedEntity = newId;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("ServerService")) {
                 // Check if one already exists
                 if (scene.FindServerService()) {
@@ -669,8 +756,8 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
 
     bool rebuilt = false;
 
-    ImGui::SetNextWindowPos(ImVec2(1015, 262), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(255, 360), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(1103, 269), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(260, 434), ImGuiCond_FirstUseEver);
     ImGui::Begin("Properties", nullptr);
 
     // Name
@@ -696,7 +783,7 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
 
     // Physics
     if (!entity->HasFlag(ENTITY_LIGHT) && !entity->HasFlag(ENTITY_CAMERA) && !entity->HasFlag(ENTITY_WORLD_ENV) && !entity->HasFlag(ENTITY_SERVER_SERVICE)) {
-        ImGui::TextUnformatted("Physics (4X-Physics)");
+        ImGui::TextUnformatted("Physics (Bullet)");
         if (ImGui::Checkbox("Simulated", &entity->physics.enabled)) {
             if (entity->physics.enabled && !entity->vertices.empty()) {
                 entity->physics.velocity = {0,0,0};
@@ -714,16 +801,38 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
     // Spinning (not shown for lights, services, or WorldEnvironment)
     if (!entity->HasFlag(ENTITY_LIGHT) && !entity->HasFlag(ENTITY_WORLD_ENV) && !entity->HasFlag(ENTITY_SERVER_SERVICE)) {
         ImGui::TextUnformatted("Spinning");
-        ImGui::Checkbox("Enabled", &entity->spinning.enabled);
-        ImGui::SliderFloat("Speed", &entity->spinning.speed, 0.0f, 5.0f);
+        ImGui::Checkbox("Enabled##spin", &entity->spinning.enabled);
+        ImGui::SliderFloat("Speed##spin", &entity->spinning.speed, 0.0f, 5.0f);
+        ImGui::Separator();
+
+        // Instancing toggle
+        ImGui::TextUnformatted("Instancing");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Instancing for repeated identical models to this object, reduces draw calls when turned on.");
+        ImGui::Checkbox("Enabled##inst", &entity->instancingEnabled);
         ImGui::Separator();
 
         // Face Colors (only show for cube meshes with 24 verts * 6 = 144 floats per vert)
         int vertCount = (int)entity->vertices.size() / VERTEX_STRIDE;
+
+        // Color-undo state persists across frames and entities
+        static uint64_t s_ColorUndoId = 0;
+        static Entity s_ColorPreEdit(0, "");
+        static bool s_AnyColorChanged = false;
+
+        // Reset stale undo state when we leave a cube entity without committing
+        if (vertCount != 24) {
+            s_ColorUndoId = 0;
+            s_AnyColorChanged = false;
+        }
+
         if (vertCount == 24) {
             ImGui::TextUnformatted("Face Colors");
             const char* faceNames[] = { "Front", "Back", "Left", "Right", "Top", "Bottom" };
-            bool anyColorChanged = false;
+
+            // Push undo on first color edit activation
+            bool colorActive = false;
+
             for (int f = 0; f < 6; f++) {
                 ImGui::PushID(f);
                 float col[3] = {
@@ -731,15 +840,31 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
                     entity->faceColors.colors[f][1],
                     entity->faceColors.colors[f][2],
                 };
-                if (ImGui::ColorEdit3(faceNames[f], col, ImGuiColorEditFlags_NoInputs)) {
+                bool colorChanged = ImGui::ColorEdit3(faceNames[f], col, ImGuiColorEditFlags_NoInputs);
+                if (ImGui::IsItemActivated() && s_ColorUndoId != entity->id) {
+                    s_ColorUndoId = entity->id;
+                    s_ColorPreEdit = *entity;
+                }
+                if (ImGui::IsItemActive()) colorActive = true;
+                if (colorChanged) {
                     entity->faceColors.colors[f][0] = col[0];
                     entity->faceColors.colors[f][1] = col[1];
                     entity->faceColors.colors[f][2] = col[2];
-                    anyColorChanged = true;
+                    s_AnyColorChanged = true;
                 }
                 ImGui::PopID();
             }
-            if (anyColorChanged) {
+
+            if (!colorActive) {
+                if (s_ColorUndoId != 0 && s_AnyColorChanged) {
+                    scene.ClearRedo();
+                    scene.PushUndo(UndoEntry::Modified, s_ColorPreEdit);
+                }
+                s_ColorUndoId = 0;
+                s_AnyColorChanged = false;
+            }
+
+            if (s_AnyColorChanged) {
                 BuildCubeMesh(entity->faceColors.colors, entity->vertices, entity->indices);
                 entity->meshDirty = true;
                 rebuilt = true;
@@ -753,7 +878,7 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
     if (entity->HasFlag(ENTITY_LIGHT)) {
         ImGui::Separator();
         ImGui::TextUnformatted("Light");
-    
+
         const char* types[] = { "Directional", "Point" };
         int cur = (entity->light.type == LightType::Point) ? 1 : 0;
         if (ImGui::Combo("Type", &cur, types, 2)) {
@@ -869,7 +994,7 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
         ImGui::Separator();
         ImGui::TextUnformatted("ServerService (4xLang v0.1)");
         ImGui::TextWrapped("Server scripts run with global access to all entities.");
-        ImGui::TextWrapped("Drag .4xs script files into the hierarchy under this service.");
+        ImGui::TextWrapped("Drag .scr / .4xs script files into the hierarchy under this service.");
 
         int childCount = 0;
         for (auto& e : scene.All()) {
@@ -900,7 +1025,10 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
             ImGui::SameLine();
             ImGui::PushID("timeSlider");
             if (ImGui::SliderFloat("##time", &entity->worldEnv.timeOfDay, 0.0f, 24.0f, "%.1f")) {
-                d3d11::Skybox::SetTimeOfDay(entity->worldEnv.timeOfDay);
+                if (g_Backend == GfxBackend::D3D10)
+                    d3d10::Skybox::SetTimeOfDay(entity->worldEnv.timeOfDay);
+                else
+                    d3d11::Skybox::SetTimeOfDay(entity->worldEnv.timeOfDay);
             }
             ImGui::PopID();
         }
@@ -931,7 +1059,7 @@ bool ShowPropertiesWindow(Entity* entity, Scene& scene)
     return rebuilt;
 }
 
-void ShowGizmo(const float* view, const float* projection, Entity* entity)
+void ShowGizmo(const float* view, const float* projection, Entity* entity, Scene& scene)
 {
     if (!entity) return;
 
@@ -944,7 +1072,11 @@ void ShowGizmo(const float* view, const float* projection, Entity* entity)
     float matrix[16];
     memcpy(matrix, &world, sizeof(matrix));
 
-    ImGui::SetNextWindowPos(ImVec2(803, 6), ImGuiCond_FirstUseEver);
+    float oldPos[3] = { entity->transform.position.x, entity->transform.position.y, entity->transform.position.z };
+    float oldScale[3] = { entity->transform.scale.x, entity->transform.scale.y, entity->transform.scale.z };
+    float oldRot[3] = { entity->transform.rotation.x, entity->transform.rotation.y, entity->transform.rotation.z };
+
+    ImGui::SetNextWindowPos(ImVec2(806, 22), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(198, 35), ImGuiCond_FirstUseEver);
     ImGui::Begin("Gizmo Controls", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize);
     if (ImGui::RadioButton("T", g_Gizmo.GetOperation() == Gizmo::TRANSLATE)) g_Gizmo.SetOperation(Gizmo::TRANSLATE);
@@ -1000,6 +1132,30 @@ void ShowGizmo(const float* view, const float* projection, Entity* entity)
             entity->transform.rotation.x = atan2f(-dir[1], 0.0f);
             entity->transform.rotation.y = 0.0f;
             entity->transform.rotation.z = atan2f(-up[0], right[0]);
+        }
+
+        // Propagate transform delta to all children
+        float dx = entity->transform.position.x - oldPos[0];
+        float dy = entity->transform.position.y - oldPos[1];
+        float dz = entity->transform.position.z - oldPos[2];
+        float dsx = (oldScale[0] != 0.0f) ? entity->transform.scale.x / oldScale[0] : 1.0f;
+        float dsy = (oldScale[1] != 0.0f) ? entity->transform.scale.y / oldScale[1] : 1.0f;
+        float dsz = (oldScale[2] != 0.0f) ? entity->transform.scale.z / oldScale[2] : 1.0f;
+        float drx = entity->transform.rotation.x - oldRot[0];
+        float dry = entity->transform.rotation.y - oldRot[1];
+        float drz = entity->transform.rotation.z - oldRot[2];
+
+        auto children = scene.GetChildren(entity->id);
+        for (auto* child : children) {
+            child->transform.position.x += dx;
+            child->transform.position.y += dy;
+            child->transform.position.z += dz;
+            child->transform.scale.x *= dsx;
+            child->transform.scale.y *= dsy;
+            child->transform.scale.z *= dsz;
+            child->transform.rotation.x += drx;
+            child->transform.rotation.y += dry;
+            child->transform.rotation.z += drz;
         }
     }
 }
@@ -1102,7 +1258,7 @@ static void SaveScript(Scene& scene)
             snprintf(buf, sizeof(buf), "script_%llu", (unsigned long long)g_EditingEntity);
             name = buf;
         }
-        path = scriptsDir + "\\" + name + ".4xs";
+        path = scriptsDir + "\\" + name + ".scr";
     }
 
     std::string newContent = g_Editor.GetText();
@@ -1146,8 +1302,8 @@ void ShowEditorWindow(Scene& scene, Entity* entity)
 {
     if (!g_ShowEditor) return;
 
-    ImGui::SetNextWindowPos(ImVec2(100, 100), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(356, 26), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(514, 336), ImGuiCond_FirstUseEver);
     ImGui::Begin("4xLang Code Editor", &g_ShowEditor, ImGuiWindowFlags_MenuBar);
 
     if (ImGui::BeginMenuBar()) {
@@ -1190,8 +1346,8 @@ void ShowEditorWindow(Scene& scene, Entity* entity)
 // ── Debug Console (4xLang v0.1) ──
 void ShowDebugConsole(bool* pOpen)
 {
-    ImGui::SetNextWindowPos(ImVec2(10, 350), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(600, 200), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(0, 516), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(600, 184), ImGuiCond_FirstUseEver);
     ImGui::Begin("4xLang Debug Console", pOpen);
 
     // Toolbar
@@ -1268,8 +1424,8 @@ void ShowServerServiceWindow(Scene& scene)
     Entity* sv = scene.FindServerService();
     if (!sv) return;
 
-    ImGui::SetNextWindowPos(ImVec2(800, 300), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300, 250), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(2, 283), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(297, 221), ImGuiCond_FirstUseEver);
     ImGui::Begin("ServerService Manager", nullptr);
 
     ImGui::TextUnformatted("Server scripts (global scope):");
@@ -1314,7 +1470,7 @@ void ShowServerServiceWindow(Scene& scene)
 
     // Drop target at bottom for adding new scripts
     ImGui::Separator();
-    ImGui::TextUnformatted("Drop .4xs scripts here or click to add:");
+    ImGui::TextUnformatted("Drop .scr / .4xs scripts here or click to add:");
     if (ImGui::Button("Add Script File")) {
         char openPath[MAX_PATH] = {};
         // Default to project scripts folder if available
@@ -1324,7 +1480,7 @@ void ShowServerServiceWindow(Scene& scene)
         OPENFILENAMEA ofn = {};
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = Window::Handle();
-        ofn.lpstrFilter = "4xLang Scripts\0*.4xs\0All Files\0*.*\0";
+        ofn.lpstrFilter = "4xLang Scripts\0*.scr;*.4xs\0All Files\0*.*\0";
         ofn.lpstrFile = openPath;
         ofn.nMaxFile = MAX_PATH;
         ofn.lpstrInitialDir = defaultDir.empty() ? nullptr : defaultDir.c_str();
@@ -1458,6 +1614,14 @@ bool DrawMenuBar(Scene& scene)
             ImGui::EndMenu();
         }
 
+        // Options menu
+        if (ImGui::BeginMenu("Options")) {
+            if (ImGui::MenuItem("Save Theme...")) {
+                SaveThemeToINI();
+            }
+            ImGui::EndMenu();
+        }
+
         // Play/Stop button
         ImGui::SameLine();
         if (g_PlayMode) {
@@ -1500,6 +1664,130 @@ void EndFrame(void* context, GfxBackend backend)
         if (g_Q11.disjoint) ctx->End(g_Q11.disjoint.get());
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
+}
+
+// ── Dockspace stubs (no ImGui docking branch available; windows position manually) ──
+void BeginDockspace() {}
+void EndDockspace() {}
+
+// ── Helper: enumerate project files (non-recursive, iterative) ──
+static void EnumerateProjectFiles(const std::string& proj, std::vector<std::string>& outFiles)
+{
+    outFiles.clear();
+    struct DirEntry {
+        std::string path;
+        std::string prefix;
+        int depth;
+    };
+    std::vector<DirEntry> stack;
+    stack.push_back({ proj, "", 3 });
+
+    while (!stack.empty()) {
+        DirEntry de = stack.back();
+        stack.pop_back();
+        if (de.depth < 0) continue;
+
+        WIN32_FIND_DATAA ffd;
+        std::string search = de.path + "\\*";
+        HANDLE h = FindFirstFileA(search.c_str(), &ffd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+
+        do {
+            if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0) continue;
+            std::string full = de.path + "\\" + ffd.cFileName;
+            std::string rel = de.prefix + ffd.cFileName;
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (de.depth > 0)
+                    stack.push_back({ full, rel + "/", de.depth - 1 });
+            } else {
+                outFiles.push_back(rel);
+            }
+        } while (FindNextFileA(h, &ffd) != 0);
+        FindClose(h);
+    }
+
+    std::sort(outFiles.begin(), outFiles.end());
+}
+
+// ── Directory Manager (bottom panel) ──
+void ShowDirectoryManagerWindow()
+{
+    ImGui::SetNextWindowPos(ImVec2(606, 514), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(490, 189), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Directory Manager", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
+
+    if (ProjectManagerUI::g_ProjectFolder.empty()) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No project open");
+        ImGui::End();
+        return;
+    }
+
+    std::string& proj = ProjectManagerUI::g_ProjectFolder;
+    static std::vector<std::string> s_Files;
+    static double s_LastRefresh = 0.0;
+
+    double now = ImGui::GetTime();
+    if (now - s_LastRefresh > 1.0) {
+        s_LastRefresh = now;
+        EnumerateProjectFiles(proj, s_Files);
+    }
+
+    ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_DefaultOpen |
+        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanFullWidth;
+    bool rootOpen = ImGui::TreeNodeEx("dir://", rootFlags);
+    if (ImGui::IsItemClicked() && ImGui::IsMouseDoubleClicked(0)) {
+        ShellExecuteA(nullptr, "open", proj.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    if (rootOpen) {
+        std::string lastDir;
+        for (auto& f : s_Files) {
+            size_t slash = f.find_last_of("/");
+            std::string dirName = (slash == std::string::npos) ? "" : f.substr(0, slash);
+            std::string baseName = (slash == std::string::npos) ? f : f.substr(slash + 1);
+
+            if (dirName != lastDir) {
+                lastDir = dirName;
+                if (dirName.empty()) continue;
+                ImGui::TextUnformatted(dirName.c_str());
+            }
+
+            const char* icon = " ";
+            size_t dot = baseName.rfind('.');
+            if (dot != std::string::npos) {
+                std::string ext = baseName.substr(dot);
+                if (ext == ".scr" || ext == ".4xs") icon = "[S]";
+                else if (ext == ".gaf") icon = "[G]";
+                else if (ext == ".4pf" || ext == ".4xp") icon = "[P]";
+                else if (ext == ".obj" || ext == ".sdkmesh") icon = "[M]";
+                else icon = "[F]";
+            }
+
+            bool sel = false;
+            std::string label = std::string(icon) + " " + baseName;
+            ImGui::Selectable(label.c_str(), &sel);
+
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                std::string absPath = ProjectManager::DirToAbsolute(proj, "dir://" + f);
+                dot = baseName.rfind('.');
+                if (dot != std::string::npos) {
+                    std::string ext = baseName.substr(dot);
+                    if (ext == ".scr" || ext == ".4xs") {
+                        Overlay::g_EditorPath = absPath;
+                        Overlay::g_EditingEntity = 0;
+                        Overlay::g_ShowEditor = true;
+                        std::string content = ReadFileToString(absPath);
+                        g_Editor.SetLanguageDefinition(TextEditor::LanguageDefinition::Lua());
+                        g_Editor.SetPalette(TextEditor::GetRetroBluePalette());
+                        g_Editor.SetText(content);
+                        g_EditorTextChanged = false;
+                    }
+                }
+            }
+        }
+        ImGui::TreePop();
+    }
+
+    ImGui::End();
 }
 
 void Shutdown()

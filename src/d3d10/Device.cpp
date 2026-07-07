@@ -1,5 +1,4 @@
 #include "Device.h"
-#include <stdexcept>
 
 namespace d3d10 {
 namespace {
@@ -12,17 +11,15 @@ ComPtr<ID3D10Texture2D>         g_DepthTex;
 int g_Width = 0;
 int g_Height = 0;
 
-static void ThrowIfFailed(HRESULT hr, const char* msg)
-{
-    if (FAILED(hr)) throw std::runtime_error(msg);
-}
-
-static void BuildRenderTargets()
+static bool BuildRenderTargets()
 {
     ComPtr<ID3D10Texture2D> back;
-    g_Swap->GetBuffer(0, __uuidof(ID3D10Texture2D), (void**)back.addr());
-    ThrowIfFailed(g_Dev->CreateRenderTargetView(back.get(), nullptr, g_RTV.addr()),
-                  "CreateRenderTargetView failed");
+    if (FAILED(g_Swap->GetBuffer(0, __uuidof(ID3D10Texture2D), (void**)back.addr())))
+        return false;
+    if (!back)
+        return false;
+    if (FAILED(g_Dev->CreateRenderTargetView(back.get(), nullptr, g_RTV.addr())))
+        return false;
 
     D3D10_TEXTURE2D_DESC dd = {};
     dd.Width            = (UINT)g_Width;
@@ -33,16 +30,17 @@ static void BuildRenderTargets()
     dd.SampleDesc.Count = 1;
     dd.Usage            = D3D10_USAGE_DEFAULT;
     dd.BindFlags        = D3D10_BIND_DEPTH_STENCIL;
-    ThrowIfFailed(g_Dev->CreateTexture2D(&dd, nullptr, g_DepthTex.addr()),
-                  "CreateTexture2D (depth) failed");
-    ThrowIfFailed(g_Dev->CreateDepthStencilView(g_DepthTex.get(), nullptr, g_DSV.addr()),
-                  "CreateDepthStencilView failed");
+    if (FAILED(g_Dev->CreateTexture2D(&dd, nullptr, g_DepthTex.addr())))
+        return false;
+    if (FAILED(g_Dev->CreateDepthStencilView(g_DepthTex.get(), nullptr, g_DSV.addr())))
+        return false;
 
     ID3D10RenderTargetView* rtvRaw = g_RTV.get();
     g_Dev->OMSetRenderTargets(1, &rtvRaw, g_DSV.get());
 
     D3D10_VIEWPORT vp = { 0, 0, (UINT)g_Width, (UINT)g_Height, 0.f, 1.f };
     g_Dev->RSSetViewports(1, &vp);
+    return true;
 }
 
 } // anonymous namespace
@@ -79,7 +77,7 @@ bool Init(HWND hwnd, int width, int height)
         }
     }
 
-    BuildRenderTargets();
+    if (!BuildRenderTargets()) return false;
     return true;
 }
 
@@ -120,7 +118,8 @@ void Resize(int width, int height)
 
     HRESULT hr = g_Swap->ResizeBuffers(0, (UINT)g_Width, (UINT)g_Height,
                                         DXGI_FORMAT_UNKNOWN, 0);
-    if (SUCCEEDED(hr)) BuildRenderTargets();
+    if (FAILED(hr)) return;
+    BuildRenderTargets();
 }
 
 ID3D10Device* GetD3D() { return g_Dev.get(); }

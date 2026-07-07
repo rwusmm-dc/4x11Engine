@@ -1,6 +1,9 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <stdexcept>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -13,6 +16,7 @@
 #include "io/Archive.h"
 #include "d3d10/Device.h"
 #include "d3d10/Pipeline.h"
+#include "d3d10/skybox.h"
 #include "d3d11/Device.h"
 #include "d3d11/Pipeline.h"
 #include "d3d11/skybox.h"
@@ -23,8 +27,9 @@
 #include "core/Project.h"
 #endif
 #include "core/CullingSystem.h"
-#include "phy/Physics.h"
+#include "phy/4xPhys.h"
 #include "script/ScriptEngine.h"
+
 
 using namespace DirectX;
 
@@ -43,7 +48,7 @@ bool g_PlayMode = false;
 bool g_PlayRequest = false;
 static std::vector<Entity> g_SavedScene; // snapshot before play mode
 static CullingSystem g_Culling;
-static PhysicsWorld g_Physics;
+static PhysWorld4X g_4xPhys;
 static ScriptEngine* g_ScriptEngineInst = nullptr;
 
 static Entity* GetActiveCamera()
@@ -127,6 +132,9 @@ static void HandleCameraInput(float dt)
 #ifdef EDITOR_BUILD
 static bool g_UndoHeld = false;
 static bool g_RedoHeld = false;
+static bool g_CopyHeld = false;
+static bool g_PasteHeld = false;
+static Entity g_CopiedEntity(0, "");
 
 static void DeleteSelectedEntity()
 {
@@ -146,9 +154,43 @@ static void DeleteSelectedEntity()
     g_Scene.RemoveEntity(g_SelectedEntity);
     g_SelectedEntity = 0;
 }
+
+static std::string MakeUniqueName(Scene& scene, const std::string& base)
+{
+    std::string name = base;
+    int suffix = 1;
+    bool exists = true;
+    while (exists) {
+        exists = false;
+        for (auto& e : scene.All())
+            if (e.name == name) { exists = true; break; }
+        if (exists) name = base + " (" + std::to_string(suffix++) + ")";
+    }
+    return name;
+}
+
+static void PasteEntity(Scene& scene)
+{
+    if (g_CopiedEntity.id == 0) return;
+    uint64_t newId = scene.CreateEntity(MakeUniqueName(scene, g_CopiedEntity.name));
+    Entity* e = scene.FindEntity(newId);
+    if (!e) return;
+    *e = g_CopiedEntity;
+    e->id = newId;
+    e->meshDirty = true;
+    g_SelectedEntity = newId;
+    scene.ClearRedo();
+    scene.PushUndo(UndoEntry::Removed, *e);
+}
+
+static void CopyEntity(Scene& scene)
+{
+    Entity* e = scene.FindEntity(g_SelectedEntity);
+    if (e) g_CopiedEntity = *e;
+}
 #endif
 
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int)
 {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-function-type"
@@ -158,6 +200,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     if (SetDpiCtx)
         SetDpiCtx(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)));
 
+    // ── Parse --dx command-line argument ──
+    int forceDX = 0; // 0 = auto, 10 = D3D10 only, 11 = D3D11 only
+    int argc;
+    LPWSTR* argvW = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argvW) {
+        for (int i = 1; i < argc; i++) {
+            if (wcsncmp(argvW[i], L"--dx=", 5) == 0) {
+                int val = _wtoi(argvW[i] + 5);
+                if (val == 10) forceDX = 10;
+                else if (val == 11) forceDX = 11;
+            }
+        }
+        LocalFree(argvW);
+    }
+
     const char* windowTitle = "4xEngine";
 #ifdef EDITOR_BUILD
     windowTitle = "4xEngine - Project Manager";
@@ -165,22 +222,42 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     if (!Window::Create(hInst, 1280, 720, windowTitle))
         return -1;
 
-    if (d3d11::Device::Init(Window::Handle(), Window::Width(), Window::Height())) {
-        if (d3d11::Pipeline::Init(Window::Width(), Window::Height())) {
-            g_Backend = GfxBackend::D3D11;
-            d3d11::Skybox::Init();
-        } else {
-            d3d11::Device::Shutdown();
+    // Pump initial messages so the window doesn't appear "not responding"
+    Window::ProcessMessages();
+
+    try {
+        if (forceDX != 10) {
+            if (d3d11::Device::Init(Window::Handle(), Window::Width(), Window::Height())) {
+                Window::ProcessMessages();
+                if (d3d11::Pipeline::Init(Window::Width(), Window::Height())) {
+                    g_Backend = GfxBackend::D3D11;
+                    d3d11::Skybox::Init();
+                } else {
+                    d3d11::Device::Shutdown();
+                }
+            }
         }
+
+        if (g_Backend == GfxBackend::None && forceDX != 11) {
+            Window::ProcessMessages();
+            if (!d3d10::Device::Init(Window::Handle(), Window::Width(), Window::Height()))
+                return -1;
+            if (!d3d10::Pipeline::Init(Window::Width(), Window::Height()))
+                return -1;
+            g_Backend = GfxBackend::D3D10;
+            d3d10::Skybox::Init();
+        }
+    } catch (const std::exception& e) {
+        std::string msg = std::string("DirectX initialization error:\n") + e.what();
+        MessageBoxA(nullptr, msg.c_str(), "Error", MB_OK);
+        return -1;
+    }
+    if (g_Backend == GfxBackend::None) {
+        MessageBoxA(nullptr, "No compatible DirectX device found", "Error", MB_OK);
+        return -1;
     }
 
-    if (g_Backend == GfxBackend::None) {
-        if (!d3d10::Device::Init(Window::Handle(), Window::Width(), Window::Height()))
-            return -1;
-        if (!d3d10::Pipeline::Init(Window::Width(), Window::Height()))
-            return -1;
-        g_Backend = GfxBackend::D3D10;
-    }
+    Window::ProcessMessages();
 
     void* devPtr = (g_Backend == GfxBackend::D3D10)
         ? (void*)d3d10::Device::GetD3D()
@@ -230,7 +307,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         // Initialize skybox time from WorldEnvironment
         Entity* we = g_Scene.FindWorldEnvironment();
         if (we) {
-            d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+            if (g_Backend == GfxBackend::D3D10)
+                d3d10::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+            else
+                d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
         }
 
         g_ScriptEngineInst = new ScriptEngine();
@@ -258,8 +338,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         DWORD regSize = sizeof(recentProj);
         if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\4xEngine", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             if (RegQueryValueExA(hKey, "RecentProject", nullptr, nullptr, (LPBYTE)recentProj, &regSize) == ERROR_SUCCESS) {
-                if (GetFileAttributesA((std::string(recentProj) + "\\project.4xp").c_str()) != INVALID_FILE_ATTRIBUTES) {
+                if (GetFileAttributesA((std::string(recentProj) + "\\project.4pf").c_str()) != INVALID_FILE_ATTRIBUTES ||
+                    GetFileAttributesA((std::string(recentProj) + "\\project.4xp").c_str()) != INVALID_FILE_ATTRIBUTES) {
                     ProjectManagerUI::g_ProjectFolder = recentProj;
+                    ProjectManagerUI::g_Done = true;
                     std::string sceneFile = std::string(recentProj) + "\\scenes\\default.gaf";
                     std::vector<Entity> loaded;
                     if (ReadGAF(sceneFile.c_str(), loaded)) {
@@ -284,7 +366,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
         Entity* we = g_Scene.FindWorldEnvironment();
         if (we) {
-            d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+            if (g_Backend == GfxBackend::D3D10)
+                d3d10::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+            else
+                d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
         }
 
         SetWindowTextA(Window::Handle(), "4xEngine");
@@ -300,9 +385,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     g_Camera.SetPosition(0.0f, 2.0f, -5.0f);
 
     bool running = true;
-#ifdef EDITOR_BUILD
-    bool pmDone = ProjectManagerUI::g_Done;
-#endif
     while (running) {
         running = Window::ProcessMessages();
         if (!running) break;
@@ -329,9 +411,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         Overlay::NewFrame();
         Overlay::BeginFrame();
 
-        if (!pmDone) {
+        if (!ProjectManagerUI::g_Done) {
             if (ProjectManagerUI::ShowWindow()) {
-                pmDone = true;
                 std::string folder = ProjectManagerUI::g_ProjectFolder;
                 std::string sceneFile = folder + "\\scenes\\default.gaf";
                 std::vector<Entity> loaded;
@@ -342,7 +423,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                 }
                 Entity* we = g_Scene.FindWorldEnvironment();
                 if (we) {
-                    d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+                    if (g_Backend == GfxBackend::D3D10)
+                        d3d10::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+                    else
+                        d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
                 }
                 if (g_Scene.All().empty()) {
                     g_SelectedEntity = CreateCubeEntity(g_Scene);
@@ -375,7 +459,22 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
             bool ctrl = GetAsyncKeyState(VK_CONTROL) & 0x8000;
             bool zDown = Window::Keys()['Z'];
             bool yDown = Window::Keys()['Y'];
-            if (ctrl && zDown && !g_UndoHeld) {
+            bool cDown = Window::Keys()['C'];
+            bool vDown = Window::Keys()['V'];
+
+            // Copy selected entity (Ctrl+C)
+            if (ctrl && cDown && !g_CopyHeld && g_SelectedEntity != 0)
+                CopyEntity(g_Scene);
+            g_CopyHeld = ctrl && cDown;
+
+            // Paste entity (Ctrl+V)
+            if (ctrl && vDown && !g_PasteHeld) {
+                if (g_CopiedEntity.id != 0) PasteEntity(g_Scene);
+            }
+            g_PasteHeld = ctrl && vDown;
+
+            // Undo (Ctrl+Z) — skip if code editor is focused
+            if (ctrl && zDown && !g_UndoHeld && !ImGui::GetIO().WantCaptureKeyboard) {
                 if (g_Scene.CanUndo()) {
                     UndoEntry ue = g_Scene.PopUndo();
                     if (ue.type == UndoEntry::Removed) {
@@ -387,7 +486,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                         if (g_SelectedEntity == ue.entity.id) g_SelectedEntity = 0;
                         ue.type = UndoEntry::Added;
                         g_Scene.PushRedo(std::move(ue));
-                    } else {
+                    } else if (ue.type == UndoEntry::Added) {
                         g_Scene.InsertEntity(std::move(ue.entity));
                         g_Scene.All().back().meshDirty = true;
                         g_SelectedEntity = g_Scene.All().back().id;
@@ -395,6 +494,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                         redoE.type = UndoEntry::Removed;
                         redoE.entity = g_Scene.All().back();
                         g_Scene.PushRedo(std::move(redoE));
+                    } else { // Modified — restore old entity state
+                        Entity* cur = g_Scene.FindEntity(ue.entity.id);
+                        if (cur) {
+                            UndoEntry redoE;
+                            redoE.type = UndoEntry::Modified;
+                            redoE.entity = *cur;
+                            g_Scene.PushRedo(std::move(redoE));
+                            *cur = std::move(ue.entity);
+                            cur->meshDirty = true;
+                        }
                     }
                 }
             }
@@ -411,7 +520,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                         if (g_SelectedEntity == id) g_SelectedEntity = 0;
                         ue.type = UndoEntry::Added;
                         g_Scene.PushUndo(std::move(ue));
-                    } else {
+                    } else if (ue.type == UndoEntry::Added) {
                         g_Scene.InsertEntity(std::move(ue.entity));
                         g_Scene.All().back().meshDirty = true;
                         g_SelectedEntity = g_Scene.All().back().id;
@@ -419,6 +528,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                         undoE.type = UndoEntry::Removed;
                         undoE.entity = g_Scene.All().back();
                         g_Scene.PushUndo(std::move(undoE));
+                    } else { // Modified — restore old entity state
+                        Entity* cur = g_Scene.FindEntity(ue.entity.id);
+                        if (cur) {
+                            UndoEntry undoE;
+                            undoE.type = UndoEntry::Modified;
+                            undoE.entity = *cur;
+                            g_Scene.PushUndo(std::move(undoE));
+                            *cur = std::move(ue.entity);
+                            cur->meshDirty = true;
+                        }
                     }
                 }
             }
@@ -500,10 +619,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                 // Restore skybox to match restored WorldEnvironment
                 Entity* we = g_Scene.FindWorldEnvironment();
                 if (we) {
-                    d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
-                    d3d11::Skybox::SetSkyColor(we->worldEnv.skyColor[0],
-                                                we->worldEnv.skyColor[1],
-                                                we->worldEnv.skyColor[2]);
+                    if (g_Backend == GfxBackend::D3D10) {
+                        d3d10::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+                        d3d10::Skybox::SetSkyColor(we->worldEnv.skyColor[0],
+                                                    we->worldEnv.skyColor[1],
+                                                    we->worldEnv.skyColor[2]);
+                    } else {
+                        d3d11::Skybox::SetTimeOfDay(we->worldEnv.timeOfDay);
+                        d3d11::Skybox::SetSkyColor(we->worldEnv.skyColor[0],
+                                                    we->worldEnv.skyColor[1],
+                                                    we->worldEnv.skyColor[2]);
+                    }
                 }
             }
         }
@@ -514,7 +640,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
             for (auto& e : g_Scene.All())
                 if (e.spinning.enabled)
                     e.transform.rotation.y += e.spinning.speed * dt;
-            g_Physics.Tick(dt, g_Scene.All());
+            g_4xPhys.Tick(dt, g_Scene.All());
             if (g_ScriptEngineInst) {
                 g_ScriptEngineInst->Tick(dt);
 #ifdef EDITOR_BUILD
@@ -552,23 +678,37 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
         Entity* worldEnv = g_Scene.FindWorldEnvironment();
         if (worldEnv) {
-            d3d11::Skybox::SetEnabled(true);
-            d3d11::Skybox::SetSkyColor(worldEnv->worldEnv.skyColor[0],
-                                         worldEnv->worldEnv.skyColor[1],
-                                         worldEnv->worldEnv.skyColor[2]);
-            // Sun provides the primary directional light (direction/color from skybox)
-            // Skybox's sunDir points FROM scene TO sun; shader expects light travel direction
-            // (sun → scene), so we negate it.
-            auto ts = d3d11::Skybox::GetTimeState();
-            float wIntensity = worldEnv->worldEnv.lightIntensity;
-            ld10.sunDir[0] = ld11.sunDir[0] = -ts.sunDir[0];
-            ld10.sunDir[1] = ld11.sunDir[1] = -ts.sunDir[1];
-            ld10.sunDir[2] = ld11.sunDir[2] = -ts.sunDir[2];
-            ld10.sunColor[0] = ld11.sunColor[0] = ts.sunColor[0] * wIntensity;
-            ld10.sunColor[1] = ld11.sunColor[1] = ts.sunColor[1] * wIntensity;
-            ld10.sunColor[2] = ld11.sunColor[2] = ts.sunColor[2] * wIntensity;
-            ld10.sunColor[3] = ld11.sunColor[3] = 1.0f;
-            ld10.flags[0] = ld11.flags[0] = 1.0f; // sun enabled
+            if (g_Backend == GfxBackend::D3D10) {
+                d3d10::Skybox::SetEnabled(true);
+                d3d10::Skybox::SetSkyColor(worldEnv->worldEnv.skyColor[0],
+                                            worldEnv->worldEnv.skyColor[1],
+                                            worldEnv->worldEnv.skyColor[2]);
+                auto ts = d3d10::Skybox::GetTimeState();
+                float wIntensity = worldEnv->worldEnv.lightIntensity;
+                ld10.sunDir[0] = -ts.sunDir[0];
+                ld10.sunDir[1] = -ts.sunDir[1];
+                ld10.sunDir[2] = -ts.sunDir[2];
+                ld10.sunColor[0] = ts.sunColor[0] * wIntensity;
+                ld10.sunColor[1] = ts.sunColor[1] * wIntensity;
+                ld10.sunColor[2] = ts.sunColor[2] * wIntensity;
+                ld10.sunColor[3] = 1.0f;
+                ld10.flags[0] = 1.0f;
+            } else {
+                d3d11::Skybox::SetEnabled(true);
+                d3d11::Skybox::SetSkyColor(worldEnv->worldEnv.skyColor[0],
+                                             worldEnv->worldEnv.skyColor[1],
+                                             worldEnv->worldEnv.skyColor[2]);
+                auto ts = d3d11::Skybox::GetTimeState();
+                float wIntensity = worldEnv->worldEnv.lightIntensity;
+                ld11.sunDir[0] = -ts.sunDir[0];
+                ld11.sunDir[1] = -ts.sunDir[1];
+                ld11.sunDir[2] = -ts.sunDir[2];
+                ld11.sunColor[0] = ts.sunColor[0] * wIntensity;
+                ld11.sunColor[1] = ts.sunColor[1] * wIntensity;
+                ld11.sunColor[2] = ts.sunColor[2] * wIntensity;
+                ld11.sunColor[3] = 1.0f;
+                ld11.flags[0] = 1.0f;
+            }
         }
 
         // Entity lights: Directional entities override/author the sun; Point
@@ -688,44 +828,149 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                     visibleSet[i] = true;
         }
 
+        // ── Batching: group visible entities by mesh identity (hash-based, O(N)) ──
+        static auto MeshHash = [](const std::vector<float>& verts, const std::vector<uint32_t>& idxs) -> size_t {
+            size_t h = 14695981039346656037ULL;
+            auto mix = [&](const void* data, size_t len) {
+                const uint8_t* p = (const uint8_t*)data;
+                for (size_t i = 0; i < len; i++) {
+                    h ^= (size_t)p[i];
+                    h *= 1099511628211ULL;
+                }
+            };
+            size_t vs = verts.size(), is = idxs.size();
+            mix(&is, sizeof(is));
+            mix(idxs.data(), is * sizeof(uint32_t));
+            mix(&vs, sizeof(vs));
+            mix(verts.data(), vs * sizeof(float));
+            return h;
+        };
+
+        struct MeshGroup {
+            Entity* first;
+            std::vector<size_t> sceneIndices;
+        };
+        std::vector<MeshGroup> meshGroups;
+        std::unordered_map<size_t, std::vector<size_t>> hashToIndices;
+
+        for (size_t i = 0; i < g_Scene.All().size(); ++i) {
+            if (!visibleSet[i]) continue;
+            auto& e = g_Scene.All()[i];
+            if (e.vertices.empty()) continue;
+            size_t h = MeshHash(e.vertices, e.indices);
+            hashToIndices[h].push_back(i);
+        }
+
+        for (auto& kv : hashToIndices) {
+            auto& indices = kv.second;
+            if (indices.empty()) continue;
+            MeshGroup mg;
+            mg.first = &g_Scene.All()[indices[0]];
+            mg.sceneIndices = std::move(indices);
+            // Verify first entity matches rest (hash collision safety)
+            auto& refVerts = mg.first->vertices;
+            auto& refIdxs  = mg.first->indices;
+            for (size_t k = 1; k < mg.sceneIndices.size(); ) {
+                auto& oe = g_Scene.All()[mg.sceneIndices[k]];
+                if (oe.vertices.size() == refVerts.size() &&
+                    oe.indices.size() == refIdxs.size() &&
+                    memcmp(oe.vertices.data(), refVerts.data(), refVerts.size() * sizeof(float)) == 0 &&
+                    memcmp(oe.indices.data(), refIdxs.data(), refIdxs.size() * sizeof(uint32_t)) == 0) {
+                    k++;
+                } else {
+                    // Hash collision: treat as singleton
+                    MeshGroup singleton;
+                    singleton.first = &oe;
+                    singleton.sceneIndices.push_back(mg.sceneIndices[k]);
+                    meshGroups.push_back(std::move(singleton));
+                    mg.sceneIndices.erase(mg.sceneIndices.begin() + k);
+                }
+            }
+            if (!mg.sceneIndices.empty())
+                meshGroups.push_back(std::move(mg));
+        }
+
         if (g_Backend == GfxBackend::D3D10) {
             d3d10::Device::Clear(0.08f, 0.08f, 0.12f, 1.0f);
+            if (worldEnv) {
+                if (g_GameMode || g_PlayMode)
+                    d3d10::Skybox::Update(dt);
+                d3d10::Skybox::Draw(reinterpret_cast<const float*>(&view),
+                                    reinterpret_cast<const float*>(&proj), aspect,
+                                    static_cast<float>(totalTime));
+            }
             d3d10::Pipeline::Bind();
             d3d10::Pipeline::SetViewProj(view, proj);
             d3d10::Pipeline::SetLightData(ld10);
-
-            for (size_t i = 0; i < g_Scene.All().size(); ++i) {
-                if (!visibleSet[i]) continue;
-                auto& entity = g_Scene.All()[i];
-                auto wit = worldById.find(entity.id);
-                if (wit == worldById.end()) continue;
-                d3d10::Pipeline::DrawEntity(entity.id, wit->second,
-                    entity.vertices.data(), (int)entity.vertices.size() / VERTEX_STRIDE,
-                    entity.indices.data(), (int)entity.indices.size(), false);
+            for (auto& mg : meshGroups) {
+                Entity* first = mg.first;
+                std::vector<XMMATRIX> batchWorlds;
+                std::vector<size_t> singles;
+                for (size_t si : mg.sceneIndices) {
+                    auto& e = g_Scene.All()[si];
+                    XMMATRIX w = ComputeWorldMatrix(e.transform);
+                    if (e.instancingEnabled && mg.sceneIndices.size() >= 2)
+                        batchWorlds.push_back(w);
+                    else
+                        singles.push_back(si);
+                }
+                if (batchWorlds.size() >= 2)
+                    d3d10::Pipeline::DrawEntityInstanced(first->id, batchWorlds.data(), (int)batchWorlds.size(),
+                        first->vertices.data(), (int)first->vertices.size() / VERTEX_STRIDE,
+                        first->indices.data(), (int)first->indices.size(), false);
+                else if (batchWorlds.size() == 1)
+                    d3d10::Pipeline::DrawEntity(first->id, batchWorlds[0],
+                        first->vertices.data(), (int)first->vertices.size() / VERTEX_STRIDE,
+                        first->indices.data(), (int)first->indices.size(), false);
+                for (size_t si : singles) {
+                    auto& e = g_Scene.All()[si];
+                    auto wit = worldById.find(e.id);
+                    if (wit == worldById.end()) continue;
+                    d3d10::Pipeline::DrawEntity(e.id, wit->second,
+                        e.vertices.data(), (int)e.vertices.size() / VERTEX_STRIDE,
+                        e.indices.data(), (int)e.indices.size(), false);
+                }
             }
         } else {
             d3d11::Device::Clear(0.08f, 0.08f, 0.12f, 1.0f);
             if (worldEnv) {
-                // Time advances in game mode or play mode
                 if (g_GameMode || g_PlayMode)
                     d3d11::Skybox::Update(dt);
                 d3d11::Skybox::Draw(reinterpret_cast<const float*>(&view),
                                     reinterpret_cast<const float*>(&proj), aspect,
                                     static_cast<float>(totalTime));
-
             }
             d3d11::Pipeline::Bind();
             d3d11::Pipeline::SetViewProj(view, proj);
             d3d11::Pipeline::SetLightData(ld11);
-
-            for (size_t i = 0; i < g_Scene.All().size(); ++i) {
-                if (!visibleSet[i]) continue;
-                auto& entity = g_Scene.All()[i];
-                auto wit = worldById.find(entity.id);
-                if (wit == worldById.end()) continue;
-                d3d11::Pipeline::DrawEntity(entity.id, wit->second,
-                    entity.vertices.data(), (int)entity.vertices.size() / VERTEX_STRIDE,
-                    entity.indices.data(), (int)entity.indices.size(), false);
+            for (auto& mg : meshGroups) {
+                Entity* first = mg.first;
+                std::vector<XMMATRIX> batchWorlds;
+                std::vector<size_t> singles;
+                for (size_t si : mg.sceneIndices) {
+                    auto& e = g_Scene.All()[si];
+                    XMMATRIX w = ComputeWorldMatrix(e.transform);
+                    if (e.instancingEnabled && mg.sceneIndices.size() >= 2)
+                        batchWorlds.push_back(w);
+                    else
+                        singles.push_back(si);
+                }
+                if (batchWorlds.size() >= 2)
+                    d3d11::Pipeline::DrawEntityInstanced(first->id, batchWorlds.data(), (int)batchWorlds.size(),
+                        first->vertices.data(), (int)first->vertices.size() / VERTEX_STRIDE,
+                        first->indices.data(), (int)first->indices.size(), false);
+                else if (batchWorlds.size() == 1)
+                    d3d11::Pipeline::DrawEntity(first->id, batchWorlds[0],
+                        first->vertices.data(), (int)first->vertices.size() / VERTEX_STRIDE,
+                        first->indices.data(), (int)first->indices.size(), false);
+                for (size_t si : singles) {
+                    auto& e = g_Scene.All()[si];
+                    auto wit = worldById.find(e.id);
+                    if (wit == worldById.end()) continue;
+                    d3d11::Pipeline::DrawEntity(e.id, wit->second,
+                        e.vertices.data(), (int)e.vertices.size() / VERTEX_STRIDE,
+                        e.indices.data(), (int)e.indices.size(), false);
+                }
             }
         }
 
@@ -738,6 +983,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
 #ifdef EDITOR_BUILD
         Overlay::DrawMenuBar(g_Scene);
+        Overlay::BeginDockspace();
 
         Entity* selected = nullptr;
         if (g_SelectedEntity != 0)
@@ -762,7 +1008,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
         if (selected && (selected->HasFlag(ENTITY_SERVER_SERVICE) || selected->HasFlag(ENTITY_SCRIPT) || selected->HasFlag(ENTITY_WORLD_ENV))) {
         } else {
-            Overlay::ShowGizmo(reinterpret_cast<const float*>(&view), reinterpret_cast<const float*>(&proj), selected);
+            Overlay::ShowGizmo(reinterpret_cast<const float*>(&view), reinterpret_cast<const float*>(&proj), selected, g_Scene);
         }
 
         Overlay::DrawLightIcons(g_Scene, reinterpret_cast<const float*>(&view),
@@ -774,10 +1020,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
         Overlay::ShowServerServiceWindow(g_Scene);
 
+        Overlay::ShowDirectoryManagerWindow();
+
         Entity* editEntity = nullptr;
         if (Overlay::g_EditingEntity != 0)
             editEntity = g_Scene.FindEntity(Overlay::g_EditingEntity);
         Overlay::ShowEditorWindow(g_Scene, editEntity);
+
+        Overlay::EndDockspace();
 
         if (ImGui::IsMouseClicked(0) && !ImGui::GetIO().WantCaptureMouse && !Overlay::IsGizmoOver()) {
             ImVec2 mp = ImGui::GetMousePos();
@@ -805,11 +1055,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     Overlay::Shutdown();
 #endif
     if (g_Backend == GfxBackend::D3D10) {
+        d3d10::Skybox::Shutdown();
         d3d10::Pipeline::Shutdown();
         d3d10::Device::Shutdown();
     } else {
         d3d11::Skybox::Shutdown();
-
         d3d11::Pipeline::Shutdown();
         d3d11::Device::Shutdown();
     }

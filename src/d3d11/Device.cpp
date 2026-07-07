@@ -1,5 +1,4 @@
 #include "Device.h"
-#include <stdexcept>
 
 namespace d3d11 {
 namespace {
@@ -13,17 +12,15 @@ ComPtr<ID3D11Texture2D>         g_DepthTex;
 int g_Width  = 0;
 int g_Height = 0;
 
-static void ThrowIfFailed(HRESULT hr, const char* msg)
-{
-    if (FAILED(hr)) throw std::runtime_error(msg);
-}
-
-static void BuildRenderTargets()
+static bool BuildRenderTargets()
 {
     ComPtr<ID3D11Texture2D> back;
-    g_Swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)back.addr());
-    ThrowIfFailed(g_Dev->CreateRenderTargetView(back.get(), nullptr, g_RTV.addr()),
-                  "CreateRenderTargetView failed");
+    if (FAILED(g_Swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)back.addr())))
+        return false;
+    if (!back)
+        return false;
+    if (FAILED(g_Dev->CreateRenderTargetView(back.get(), nullptr, g_RTV.addr())))
+        return false;
 
     D3D11_TEXTURE2D_DESC dd = {};
     dd.Width            = (UINT)g_Width;
@@ -34,21 +31,22 @@ static void BuildRenderTargets()
     dd.SampleDesc.Count = 1;
     dd.Usage            = D3D11_USAGE_DEFAULT;
     dd.BindFlags        = D3D11_BIND_DEPTH_STENCIL;
-    ThrowIfFailed(g_Dev->CreateTexture2D(&dd, nullptr, g_DepthTex.addr()),
-                  "CreateTexture2D (depth) failed");
+    if (FAILED(g_Dev->CreateTexture2D(&dd, nullptr, g_DepthTex.addr())))
+        return false;
 
     D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
     dsvDesc.Format        = dd.Format;
     dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     dsvDesc.Texture2D.MipSlice = 0;
-    ThrowIfFailed(g_Dev->CreateDepthStencilView(g_DepthTex.get(), &dsvDesc, g_DSV.addr()),
-                  "CreateDepthStencilView failed");
+    if (FAILED(g_Dev->CreateDepthStencilView(g_DepthTex.get(), &dsvDesc, g_DSV.addr())))
+        return false;
 
     ID3D11RenderTargetView* rtvRaw = g_RTV.get();
     g_Ctx->OMSetRenderTargets(1, &rtvRaw, g_DSV.get());
 
     D3D11_VIEWPORT vp = { 0, 0, (FLOAT)g_Width, (FLOAT)g_Height, 0.f, 1.f };
     g_Ctx->RSSetViewports(1, &vp);
+    return true;
 }
 
 } // anonymous namespace
@@ -95,7 +93,7 @@ bool Init(HWND hwnd, int width, int height)
         }
     }
 
-    BuildRenderTargets();
+    if (!BuildRenderTargets()) return false;
     return true;
 }
 

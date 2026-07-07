@@ -3,101 +3,263 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "OUTPUT=%~1"
 if "%OUTPUT%"=="" set "OUTPUT=."
+set "WARNINGS=%~2"
+if "%WARNINGS%"=="" set "WARNINGS=0"
 
 call :FindGCC
-if "%GCC%"=="" echo ERROR: Could not find g++ (TDM-GCC), searched C:\TDM-GCC* and PATH & exit /b 1
+if not errorlevel 1 goto :HAVE_GCC
+echo.
+echo [ERROR] TDM-GCC (g++) not found.
+echo Please download and install from:
+echo   https://jmeubank.github.io/tdm-gcc/
+echo Or use the DirectXMath bundle:
+echo   https://github.com/rwusmm-dc/directx-examples/releases/download/dxmath/tdm-gcc-directxmathInstaller.exe
+pause
+exit /b 1
+:HAVE_GCC
+echo Using compiler: %GCC%
 
-set "INCS=-Isrc -Iimgui -Iimgui/backends -Izstd/include -ILuaJIT/src"
-set "LIBS=-Lzstd/dll -lzstd -LLuaJIT/src -lluajit"
-set "CFLAGS=-std=c++17 -Wall -Wextra -Wno-unused-parameter -mwindows -O2"
-set "LFLAGS=-static-libgcc -static-libstdc++ -mwindows -ld3d10 -ld3d11 -ld3dcompiler -ldxgi -luser32 -lkernel32 -ldwmapi -lcomdlg32 -luuid -lole32 -lshell32"
+echo === CPU Architecture Detection (Game Build) ===
+call :DetectCPU
+echo Using optimization flags: %MARCH%
+
+echo.
+echo === Extra Optimizations ===
+choice /C YN /N /T 5 /D Y /M "Enable extra optimizations (faster code)? y/n, auto y in 5s..."
+if not errorlevel 2 set "OPTFLAGS=-fomit-frame-pointer -ftree-vectorize -funroll-loops -ffunction-sections -fdata-sections"
+
+echo === Checking LuaJIT library ===
+if not exist "LuaJIT\src\libluajit.a" (
+    echo === Building LuaJIT library ===
+    call build_luajit.bat "%GCC%"
+    if errorlevel 1 exit /b 1
+)
+
+set "INCS=-Isrc -Iimgui -Iimgui/backends -Izstd/include -ILuaJIT/src -Ibullet3/src"
+set "LIBS=-L. -lzstd -LLuaJIT/src -lluajit"
+set "CFLAGS_BASE=-std=c++17 -mwindows %MARCH% %OPTFLAGS%"
+if "%WARNINGS%"=="1" (
+    set "CFLAGS=%CFLAGS_BASE% -Wall -Wextra -Wno-unused-parameter"
+) else (
+    set "CFLAGS=%CFLAGS_BASE% -w"
+)
+set "LFLAGS=-static-libgcc -static-libstdc++ -mwindows -Wl,--gc-sections -ld3d10 -ld3d11 -ld3dcompiler -ldxgi -luser32 -lkernel32 -ldwmapi -lcomdlg32 -luuid -lole32 -lshell32 -ldbghelp -lpsapi"
 
 set "GAME_OBJS="
+set "BULLET_OBJS=%OUTPUT%\g_btLinearMathAll.o %OUTPUT%\g_btBulletCollisionAll.o %OUTPUT%\g_btBulletDynamicsAll.o"
+set "LINK_NEEDED=0"
+set "COMPILED_COUNT=0"
 
-echo === [GAME] Compiling src/io/Archive.cpp ===
-"%GCC%" %CFLAGS% -c src/io/Archive.cpp %INCS% -o "%OUTPUT%\g_Archive.o"
+echo === [GAME] Incremental compile ===
+
+call :compile_game_if_needed "bullet3/src/btLinearMathAll.cpp" "%OUTPUT%\g_btLinearMathAll.o"
 if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_Archive.o"
+if "%COMPILE_RESULT%"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
 
-echo === [GAME] Compiling src/script/ScriptEngine.cpp ===
-"%GCC%" %CFLAGS% -c src/script/ScriptEngine.cpp %INCS% -o "%OUTPUT%\g_ScriptEngine.o"
+call :compile_game_if_needed "bullet3/src/btBulletCollisionAll.cpp" "%OUTPUT%\g_btBulletCollisionAll.o"
 if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_ScriptEngine.o"
+if "%COMPILE_RESULT%"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
 
-echo === [GAME] Compiling src/main.cpp ===
-"%GCC%" %CFLAGS% -c src/main.cpp %INCS% -o "%OUTPUT%\g_main.o"
+call :compile_game_if_needed "bullet3/src/btBulletDynamicsAll.cpp" "%OUTPUT%\g_btBulletDynamicsAll.o"
 if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_main.o"
+if "%COMPILE_RESULT%"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+echo === [GAME] NOTE: Excluding UI/Gizmo files (ImGui-dependent) ===
 
-echo === [GAME] Compiling src/core/Window.cpp ===
-"%GCC%" %CFLAGS% -c src/core/Window.cpp %INCS% -o "%OUTPUT%\g_Window.o"
+call :compile_game_if_needed "src/main.cpp" "%OUTPUT%\g_main.o"
 if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_Window.o"
+if "%COMPILE_RESULT%"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+set "GAME_OBJS=!GAME_OBJS! "%OUTPUT%\g_main.o""
 
-echo === [GAME] Compiling src/core/FPSCamera.cpp ===
-"%GCC%" %CFLAGS% -c src/core/FPSCamera.cpp %INCS% -o "%OUTPUT%\g_FPSCamera.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_FPSCamera.o"
+REM === CORE FILES ===
+for %%f in (src\core\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "FILENAME=%%~nxf"
+    if /i not "!FILENAME!"=="main.cpp" (
+        set "RELPATH=!CPPFILE:src\=!"
+        set "OBJNAME=!RELPATH:\=_!"
+        set "OBJNAME=!OBJNAME:.cpp=.o!"
+        set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+        call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+        if errorlevel 1 exit /b 1
+        if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+        set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+    )
+)
 
-echo === [GAME] Compiling src/core/ObjLoader.cpp ===
-"%GCC%" %CFLAGS% -c src/core/ObjLoader.cpp %INCS% -o "%OUTPUT%\g_ObjLoader.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_ObjLoader.o"
+REM === AI FILES ===
+for %%f in (src\ai\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/core/SdkMeshLoader.cpp ===
-"%GCC%" %CFLAGS% -c src/core/SdkMeshLoader.cpp %INCS% -o "%OUTPUT%\g_SdkMeshLoader.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_SdkMeshLoader.o"
+REM === D3D10 FILES ===
+for %%f in (src\d3d10\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/core/CullingSystem.cpp ===
-"%GCC%" %CFLAGS% -c src/core/CullingSystem.cpp %INCS% -o "%OUTPUT%\g_CullingSystem.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_CullingSystem.o"
+REM === D3D11 FILES ===
+for %%f in (src\d3d11\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/phy/Physics.cpp ===
-"%GCC%" %CFLAGS% -c src/phy/Physics.cpp %INCS% -o "%OUTPUT%\g_Physics.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_Physics.o"
+REM === ECS FILES ===
+for %%f in (src\ecs\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/ecs/ECS.cpp ===
-"%GCC%" %CFLAGS% -c src/ecs/ECS.cpp %INCS% -o "%OUTPUT%\g_ECS.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_ECS.o"
+REM === IO FILES ===
+for %%f in (src\io\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/d3d10/Device.cpp ===
-"%GCC%" %CFLAGS% -c src/d3d10/Device.cpp %INCS% -o "%OUTPUT%\g_d3d10_Device.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_d3d10_Device.o"
+REM === PHYSICS FILES ===
+for %%f in (src\phy\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/d3d10/Pipeline.cpp ===
-"%GCC%" %CFLAGS% -c src/d3d10/Pipeline.cpp %INCS% -o "%OUTPUT%\g_d3d10_Pipeline.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_d3d10_Pipeline.o"
+REM === RENDERER FILES ===
+for %%f in (src\renderer\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/d3d11/Device.cpp ===
-"%GCC%" %CFLAGS% -c src/d3d11/Device.cpp %INCS% -o "%OUTPUT%\g_d3d11_Device.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_d3d11_Device.o"
+REM === SCRIPT FILES ===
+for %%f in (src\script\*.cpp) do (
+    set "CPPFILE=%%f"
+    set "RELPATH=!CPPFILE:src\=!"
+    set "OBJNAME=!RELPATH:\=_!"
+    set "OBJNAME=!OBJNAME:.cpp=.o!"
+    set "OBJFILE=%OUTPUT%\g_!OBJNAME!"
+    call :compile_game_if_needed "!CPPFILE!" "!OBJFILE!"
+    if errorlevel 1 exit /b 1
+    if "!COMPILE_RESULT!"=="1" (set /a COMPILED_COUNT+=1 & set "LINK_NEEDED=1")
+    set "GAME_OBJS=!GAME_OBJS! "!OBJFILE!""
+)
 
-echo === [GAME] Compiling src/d3d11/Pipeline.cpp ===
-"%GCC%" %CFLAGS% -c src/d3d11/Pipeline.cpp %INCS% -o "%OUTPUT%\g_d3d11_Pipeline.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_d3d11_Pipeline.o"
+if not exist "%OUTPUT%\game.exe" set "LINK_NEEDED=1"
 
-echo === [GAME] Compiling src/d3d11/skybox.cpp ===
-"%GCC%" %CFLAGS% -c src/d3d11/skybox.cpp %INCS% -o "%OUTPUT%\g_d3d11_skybox.o"
-if errorlevel 1 exit /b 1
-set "GAME_OBJS=%GAME_OBJS% %OUTPUT%\g_d3d11_skybox.o"
+if "%LINK_NEEDED%"=="1" (
+    echo === [GAME] Linking game.exe (changed files: %COMPILED_COUNT%) ===
+    "%GCC%" -o "%OUTPUT%\game.exe" !GAME_OBJS! %BULLET_OBJS% %LIBS% %LFLAGS%
+    if errorlevel 1 (
+        echo [FAILED] Linking game.exe
+        exit /b 1
+    )
+    echo === [GAME] Built game.exe ===
+) else (
+    echo === [GAME] No changes detected, skipping link ===
+)
 
-echo === [GAME] Linking game.exe ===
-"%GCC%" -o "%OUTPUT%\game.exe" %GAME_OBJS% %LIBS% %LFLAGS%
-if errorlevel 1 exit /b 1
+echo === [GAME] Cleaning root g_*.o artifacts ===
+for %%f in (g_*.o) do del /q "%%f" >nul 2>&1
 
-echo === [GAME] Built game.exe ===
+exit /b 0
 
-rem Clean up object files
-for %%f in ("%OUTPUT%\g_*.o") do del "%%f" >nul 2>&1
+:compile_game_if_needed
+set "COMPILE_RESULT=0"
 
+if not exist "%~2" (
+    echo [GAME][COMPILE] %~1
+    "%GCC%" %CFLAGS% -c "%~1" %INCS% -o "%~2"
+    if errorlevel 1 (
+        echo [GAME][FAILED] %~1
+        exit /b 1
+    )
+    set "COMPILE_RESULT=1"
+    exit /b 0
+)
+
+powershell -NoProfile -Command "$src=(Get-Item '%~1').LastWriteTimeUtc; $obj=(Get-Item '%~2').LastWriteTimeUtc; if($src -gt $obj){exit 0}else{exit 1}"
+if errorlevel 1 (
+    echo [GAME][SKIP] %~1
+    exit /b 0
+)
+
+echo [GAME][COMPILE] %~1
+"%GCC%" %CFLAGS% -c "%~1" %INCS% -o "%~2"
+if errorlevel 1 (
+    echo [GAME][FAILED] %~1
+    exit /b 1
+)
+set "COMPILE_RESULT=1"
+exit /b 0
+
+:DetectCPU
+echo Detecting CPU capabilities from PROCESSOR_IDENTIFIER...
+echo %PROCESSOR_IDENTIFIER% | findstr /I "AVX512" >nul
+if %errorlevel%==0 (
+    echo   ✓ AVX-512 detected
+    set "MARCH=-march=skylake-avx512 -O2"
+    exit /b 0
+)
+echo %PROCESSOR_IDENTIFIER% | findstr /I "AVX2" >nul
+if %errorlevel%==0 (
+    echo   ✓ Haswell or newer detected (AVX2/FMA3 support found)
+    set "MARCH=-march=haswell -O2"
+    exit /b 0
+)
+echo %PROCESSOR_IDENTIFIER% | findstr /I "AVX" >nul
+if %errorlevel%==0 (
+    echo   ✓ Sandy Bridge/Ivy Bridge detected (AVX support found)
+    set "MARCH=-march=corei7 -O2"
+    exit /b 0
+)
+echo   ℹ No AVX detected, using SSE4.2 (Nehalem compatible)
+set "MARCH=-march=nehalem -O2"
 exit /b 0
 
 :FindGCC

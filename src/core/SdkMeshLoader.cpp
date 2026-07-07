@@ -7,6 +7,64 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <unordered_map>
+
+// D3DDECLTYPE values
+enum D3DDeclType {
+    D3D_FLOAT1   = 0,
+    D3D_FLOAT2   = 1,
+    D3D_FLOAT3   = 2,
+    D3D_FLOAT4   = 3,
+    D3D_D3DCOLOR = 4,
+    D3D_UBYTE4   = 5,
+    D3D_SHORT2   = 6,
+    D3D_SHORT4   = 7,
+    D3D_UBYTE4N  = 8,
+    D3D_SHORT2N  = 9,
+    D3D_SHORT4N  = 10,
+    D3D_USHORT2N = 11,
+    D3D_USHORT4N = 12,
+    D3D_UDEC3    = 13,
+    D3D_DEC3N    = 14,
+    D3D_FLOAT16_2 = 15,
+    D3D_FLOAT16_4 = 16,
+    D3D_UNUSED   = 17,
+};
+
+// D3DDECLUSAGE values
+enum D3DDeclUsage {
+    D3D_POSITION0 = 0,
+    D3D_BLENDWEIGHT = 1,
+    D3D_BLENDINDICES = 2,
+    D3D_NORMAL0 = 3,
+    D3D_TEXCOORD0 = 5,
+    D3D_TANGENT0 = 6,
+    D3D_BINORMAL0 = 7,
+    D3D_COLOR0 = 10,
+};
+
+static int DeclTypeSize(uint8_t type) {
+    switch (type) {
+        case D3D_FLOAT1:   return 4;
+        case D3D_FLOAT2:   return 8;
+        case D3D_FLOAT3:   return 12;
+        case D3D_FLOAT4:   return 16;
+        case D3D_D3DCOLOR: return 4;
+        case D3D_UBYTE4:   return 4;
+        case D3D_SHORT2:   return 4;
+        case D3D_SHORT4:   return 8;
+        case D3D_UBYTE4N:  return 4;
+        case D3D_SHORT2N:  return 4;
+        case D3D_SHORT4N:  return 8;
+        case D3D_USHORT2N: return 4;
+        case D3D_USHORT4N: return 8;
+        case D3D_UDEC3:    return 4;
+        case D3D_DEC3N:    return 4;
+        case D3D_FLOAT16_2: return 4;
+        case D3D_FLOAT16_4: return 8;
+        default:            return 4;
+    }
+}
 
 static bool ReadFileData(const char* filename, std::vector<unsigned char>& data)
 {
@@ -27,217 +85,318 @@ static bool ReadFileData(const char* filename, std::vector<unsigned char>& data)
     return result;
 }
 
-static bool ParseSdkMesh(const unsigned char* data, size_t size, SdkMeshHeader& header,
-                         std::vector<SdkMesh>& meshes, std::vector<SdkMaterial>& materials,
-                         std::vector<float>& vertices, std::vector<uint32_t>& indices)
+static const uint8_t* ReadOffset(const uint8_t* base, size_t fileSize, uint64_t offset, size_t minSize)
 {
+    if (offset > fileSize || fileSize - offset < minSize)
+        return nullptr;
+    return base + offset;
+}
+
+template<typename T>
+static const T* ReadStruct(const uint8_t* base, size_t fileSize, uint64_t offset)
+{
+    return reinterpret_cast<const T*>(ReadOffset(base, fileSize, offset, sizeof(T)));
+}
+
+static bool ParseSdkMesh(const uint8_t* data, size_t size,
+                         std::vector<float>& outVerts, std::vector<uint32_t>& outIndices,
+                         const float* defaultColor)
+{
+    // Validate magic
     if (size < sizeof(SdkMeshHeader)) return false;
+    if (memcmp(data, "SDKMESH", 8) != 0) return false;
 
     const SdkMeshHeader* hdr = reinterpret_cast<const SdkMeshHeader*>(data);
-    header = *hdr;
+    if (hdr->HeaderSize > size) return false;
 
-    if (memcmp(hdr->Magic, "SDKMESH", 8) != 0) return false;
-    if (memcmp(hdr->Version, "1.00", 4) != 0 && memcmp(hdr->Version, "1.01", 4) != 0) return false;
+    if (hdr->NumVertexBuffers == 0 || hdr->NumIndexBuffers == 0 || hdr->NumMeshes == 0)
+        return false;
 
-    if (hdr->NumMeshes == 0 || hdr->NumVertices == 0 || hdr->NumIndices == 0) return false;
+    // Compute the end of header area — this is where raw buffer data starts
+    uint64_t bufferDataBase = hdr->HeaderSize + hdr->NonBufferDataSize;
 
-    if (hdr->MeshOffset + hdr->NumMeshes * sizeof(SdkMesh) > size) return false;
-    const SdkMesh* meshData = reinterpret_cast<const SdkMesh*>(data + hdr->MeshOffset);
-    meshes.resize(hdr->NumMeshes);
-    for (uint32_t i = 0; i < hdr->NumMeshes; ++i) {
-        meshes[i] = meshData[i];
+    // Each VB header is followed by 32 D3DDeclElement entries (8 bytes each).
+    // Total per VB: sizeof(SdkMeshVertexBufferHeader) + 32 * sizeof(D3DDeclElement) = 288 bytes.
+    const uint64_t vbHeaderStride = sizeof(SdkMeshVertexBufferHeader) + 32 * sizeof(D3DDeclElement);
+
+    struct VBInfo {
+        uint64_t dataOffset;
+        uint64_t stride;
+        uint64_t numVerts;
+        int posOffset = -1;
+        int normOffset = -1;
+    };
+    std::vector<VBInfo> vbInfos;
+
+    for (uint32_t i = 0; i < hdr->NumVertexBuffers; i++) {
+        uint64_t off = hdr->VertexStreamHeadersOffset + i * vbHeaderStride;
+        const SdkMeshVertexBufferHeader* vbh = ReadStruct<SdkMeshVertexBufferHeader>(data, size, off);
+        if (!vbh) continue;
+
+        VBInfo vb;
+        vb.dataOffset = vbh->DataOffset;
+        vb.stride = vbh->StrideBytes;
+        vb.numVerts = vbh->NumVertices;
+
+        // Parse vertex declaration (32 D3DDeclElement entries follow the header)
+        for (int e = 0; e < 32; e++) {
+            uint64_t declOff = off + sizeof(SdkMeshVertexBufferHeader) + e * sizeof(D3DDeclElement);
+            const D3DDeclElement* decl = ReadStruct<D3DDeclElement>(data, size, declOff);
+            if (!decl) break;
+            if (decl->Type == D3D_UNUSED || decl->Usage == 0xFF) break;
+
+            if (decl->Usage == D3D_POSITION0 && decl->UsageIndex == 0) {
+                vb.posOffset = decl->Offset;
+            } else if (decl->Usage == D3D_NORMAL0 && decl->UsageIndex == 0) {
+                vb.normOffset = decl->Offset;
+            }
+        }
+
+        vbInfos.push_back(vb);
     }
 
-    if (hdr->MaterialsOffset > 0 && hdr->NumMaterials > 0) {
-        if (hdr->MaterialsOffset + hdr->NumMaterials * sizeof(SdkMaterial) > size) return false;
-        const SdkMaterial* matData = reinterpret_cast<const SdkMaterial*>(data + hdr->MaterialsOffset);
-        materials.resize(hdr->NumMaterials);
-        for (uint32_t i = 0; i < hdr->NumMaterials; ++i) {
-            materials[i] = matData[i];
+    const uint64_t ibHeaderStride = sizeof(SdkMeshIndexBufferHeader);
+
+    struct IBInfo {
+        uint64_t dataOffset;
+        uint64_t numIndices;
+        int indexType; // 2 = 16-bit, 4 = 32-bit
+    };
+    std::vector<IBInfo> ibInfos;
+
+    for (uint32_t i = 0; i < hdr->NumIndexBuffers; i++) {
+        uint64_t off = hdr->IndexStreamHeadersOffset + i * ibHeaderStride;
+        const SdkMeshIndexBufferHeader* ibh = ReadStruct<SdkMeshIndexBufferHeader>(data, size, off);
+        if (!ibh) continue;
+
+        IBInfo ib;
+        ib.dataOffset = ibh->DataOffset;
+        ib.numIndices = ibh->NumIndices;
+        ib.indexType = (ibh->IndexType == 0) ? 2 : 4;
+        ibInfos.push_back(ib);
+    }
+
+    if (vbInfos.empty() || ibInfos.empty()) return false;
+
+    // Collect all geometry and merge into one output mesh.
+    // Track unique vertex positions for deduplication.
+    struct MergedVertex {
+        float pos[3];
+        float norm[3];
+    };
+    std::vector<MergedVertex> mergedVerts;
+    std::vector<uint32_t> mergedIndices;
+    std::unordered_map<uint64_t, uint32_t> vertMap; // (vbIdx << 32 | vbVertIdx) -> merged index
+
+    struct TempFace {
+        uint32_t i0, i1, i2;
+    };
+    std::vector<TempFace> faces;
+    std::vector<float> tempPositions;
+    std::vector<float> tempNormals;
+
+    uint64_t meshArrayOff = hdr->MeshDataOffset;
+    for (uint32_t m = 0; m < hdr->NumMeshes; m++) {
+        uint64_t meshOff = meshArrayOff + m * sizeof(SdkMeshMesh);
+        const SdkMeshMesh* mesh = ReadStruct<SdkMeshMesh>(data, size, meshOff);
+        if (!mesh || mesh->NumVertexBuffers == 0) continue;
+
+        // Get VB and IB indices
+        uint32_t vbIdx = mesh->VertexBuffers[0];
+        uint32_t ibIdx = mesh->IndexBuffer;
+        if (vbIdx >= vbInfos.size() || ibIdx >= ibInfos.size()) continue;
+
+        const VBInfo& vb = vbInfos[vbIdx];
+        const IBInfo& ib = ibInfos[ibIdx];
+
+        if (vb.posOffset < 0) continue; // no position data
+
+        // Read subset indices array
+        // Each mesh has an array of subset indices at SubsetOffset
+        if (mesh->SubsetOffset == 0 || mesh->NumSubsets == 0) continue;
+
+        for (uint32_t s = 0; s < mesh->NumSubsets; s++) {
+            uint32_t subsetIdx;
+            uint64_t subsetIdxOff = mesh->SubsetOffset + s * sizeof(uint32_t);
+            const uint32_t* sp = reinterpret_cast<const uint32_t*>(ReadOffset(data, size, subsetIdxOff, sizeof(uint32_t)));
+            if (!sp) continue;
+            subsetIdx = *sp;
+
+            if (subsetIdx >= hdr->NumSubsets) continue;
+
+            // Read the subset
+            uint64_t subsetOff = hdr->SubsetDataOffset + subsetIdx * sizeof(SdkMeshSubset);
+            const SdkMeshSubset* subset = ReadStruct<SdkMeshSubset>(data, size, subsetOff);
+            if (!subset || subset->IndexCount < 3) continue;
+
+            uint64_t indexSize = ib.indexType; // 2 or 4 bytes per index
+            const uint8_t* indexBase = ReadOffset(data, size, ib.dataOffset, (subset->IndexStart + subset->IndexCount) * indexSize);
+            if (!indexBase) continue;
+
+            // Read vertex data for this subset
+            const uint8_t* vertBase = ReadOffset(data, size, vb.dataOffset, (subset->VertexStart + subset->VertexCount) * vb.stride);
+            if (!vertBase) continue;
+
+            // Process each triangle in the subset
+            for (uint64_t i = 0; i + 2 < subset->IndexCount; i += 3) {
+                uint32_t vi[3];
+                const uint8_t* iptr = indexBase + subset->IndexStart * indexSize;
+                if (ib.indexType == 2) {
+                    const uint16_t* idx16 = reinterpret_cast<const uint16_t*>(iptr);
+                    vi[0] = idx16[i] + (uint32_t)subset->VertexStart;
+                    vi[1] = idx16[i + 1] + (uint32_t)subset->VertexStart;
+                    vi[2] = idx16[i + 2] + (uint32_t)subset->VertexStart;
+                } else {
+                    const uint32_t* idx32 = reinterpret_cast<const uint32_t*>(iptr);
+                    vi[0] = idx32[i] + (uint32_t)subset->VertexStart;
+                    vi[1] = idx32[i + 1] + (uint32_t)subset->VertexStart;
+                    vi[2] = idx32[i + 2] + (uint32_t)subset->VertexStart;
+                }
+
+                // Read vertex positions
+                float pos[3][3];
+                for (int v = 0; v < 3; v++) {
+                    const uint8_t* vertPtr = vertBase + (vi[v] - subset->VertexStart) * vb.stride;
+                    const float* pf = reinterpret_cast<const float*>(vertPtr + vb.posOffset);
+                    pos[v][0] = pf[0];
+                    pos[v][1] = pf[1];
+                    pos[v][2] = pf[2];
+
+                    // Store position for later use
+                    tempPositions.push_back(pos[v][0]);
+                    tempPositions.push_back(pos[v][1]);
+                    tempPositions.push_back(pos[v][2]);
+                }
+
+                // Read normals if available, or compute from face
+                float norm[3][3];
+                bool hasNormals = (vb.normOffset >= 0);
+                if (hasNormals) {
+                    for (int v = 0; v < 3; v++) {
+                        const uint8_t* vertPtr = vertBase + (vi[v] - subset->VertexStart) * vb.stride;
+                        const float* nf = reinterpret_cast<const float*>(vertPtr + vb.normOffset);
+                        norm[v][0] = nf[0];
+                        norm[v][1] = nf[1];
+                        norm[v][2] = nf[2];
+                        float nl = sqrtf(norm[v][0]*norm[v][0] + norm[v][1]*norm[v][1] + norm[v][2]*norm[v][2]);
+                        if (nl > 1e-8f) { norm[v][0] /= nl; norm[v][1] /= nl; norm[v][2] /= nl; }
+                    }
+                } else {
+                    // Compute face normal
+                    float e1[3] = { pos[1][0]-pos[0][0], pos[1][1]-pos[0][1], pos[1][2]-pos[0][2] };
+                    float e2[3] = { pos[2][0]-pos[0][0], pos[2][1]-pos[0][1], pos[2][2]-pos[0][2] };
+                    float fn[3] = {
+                        e1[1]*e2[2] - e1[2]*e2[1],
+                        e1[2]*e2[0] - e1[0]*e2[2],
+                        e1[0]*e2[1] - e1[1]*e2[0]
+                    };
+                    float fl = sqrtf(fn[0]*fn[0] + fn[1]*fn[1] + fn[2]*fn[2]);
+                    if (fl > 1e-8f) { fn[0] /= fl; fn[1] /= fl; fn[2] /= fl; }
+                    if (fn[1] < 0) { fn[0] = -fn[0]; fn[1] = -fn[1]; fn[2] = -fn[2]; }
+                    for (int v = 0; v < 3; v++) {
+                        norm[v][0] = fn[0]; norm[v][1] = fn[1]; norm[v][2] = fn[2];
+                    }
+                }
+
+                // Store normals
+                for (int v = 0; v < 3; v++) {
+                    tempNormals.push_back(norm[v][0]);
+                    tempNormals.push_back(norm[v][1]);
+                    tempNormals.push_back(norm[v][2]);
+                }
+
+                faces.push_back({(uint32_t)(tempPositions.size()/3 - 3),
+                                 (uint32_t)(tempPositions.size()/3 - 2),
+                                 (uint32_t)(tempPositions.size()/3 - 1)});
+            }
         }
     }
 
-    if (hdr->VerticesOffset + hdr->NumVertices * 3 * sizeof(float) > size) return false;
-    vertices.resize(hdr->NumVertices * 3);
-    const float* vertData = reinterpret_cast<const float*>(data + hdr->VerticesOffset);
-    for (uint32_t i = 0; i < hdr->NumVertices * 3; ++i) {
-        vertices[i] = vertData[i];
+    if (tempPositions.empty() || faces.empty()) return false;
+
+    // Compute smoothed normals if per-vertex normals were not provided
+    if (tempNormals.empty()) {
+        tempNormals.resize(tempPositions.size(), 0.0f);
+        for (auto& f : faces) {
+            float* p0 = &tempPositions[f.i0 * 3];
+            float* p1 = &tempPositions[f.i1 * 3];
+            float* p2 = &tempPositions[f.i2 * 3];
+            float e1[3] = { p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2] };
+            float e2[3] = { p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2] };
+            float fn[3] = {
+                e1[1]*e2[2] - e1[2]*e2[1],
+                e1[2]*e2[0] - e1[0]*e2[2],
+                e1[0]*e2[1] - e1[1]*e2[0]
+            };
+            float fl = sqrtf(fn[0]*fn[0] + fn[1]*fn[1] + fn[2]*fn[2]);
+            if (fl > 1e-8f) { fn[0] /= fl; fn[1] /= fl; fn[2] /= fl; }
+            for (int v = 0; v < 3; v++) {
+                tempNormals[f.i0 * 3 + v] += fn[v];
+                tempNormals[f.i1 * 3 + v] += fn[v];
+                tempNormals[f.i2 * 3 + v] += fn[v];
+            }
+        }
+        for (size_t i = 0; i < tempNormals.size() / 3; i++) {
+            float* n = &tempNormals[i * 3];
+            float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+            if (nl > 1e-8f) { n[0] /= nl; n[1] /= nl; n[2] /= nl; }
+            else { n[0] = 0; n[1] = 1; n[2] = 0; }
+        }
     }
 
-    if (hdr->IndicesOffset + hdr->NumIndices * sizeof(uint32_t) > size) {
-        if (hdr->IndicesOffset + hdr->NumIndices * sizeof(uint16_t) > size) return false;
-        const uint16_t* idx16 = reinterpret_cast<const uint16_t*>(data + hdr->IndicesOffset);
-        indices.resize(hdr->NumIndices);
-        for (uint32_t i = 0; i < hdr->NumIndices; ++i) {
-            indices[i] = static_cast<uint32_t>(idx16[i]);
-        }
-    } else {
-        const uint32_t* idx32 = reinterpret_cast<const uint32_t*>(data + hdr->IndicesOffset);
-        indices.resize(hdr->NumIndices);
-        for (uint32_t i = 0; i < hdr->NumIndices; ++i) {
-            indices[i] = idx32[i];
-        }
+    float color[3] = { 0.7f, 0.7f, 0.7f };
+    if (defaultColor) {
+        color[0] = defaultColor[0];
+        color[1] = defaultColor[1];
+        color[2] = defaultColor[2];
+    }
+
+    outVerts.clear();
+    for (size_t i = 0; i < tempPositions.size() / 3; i++) {
+        outVerts.push_back(tempPositions[i * 3 + 0]);
+        outVerts.push_back(tempPositions[i * 3 + 1]);
+        outVerts.push_back(tempPositions[i * 3 + 2]);
+        outVerts.push_back(tempNormals[i * 3 + 0]);
+        outVerts.push_back(tempNormals[i * 3 + 1]);
+        outVerts.push_back(tempNormals[i * 3 + 2]);
+        outVerts.push_back(color[0]);
+        outVerts.push_back(color[1]);
+        outVerts.push_back(color[2]);
+    }
+
+    outIndices.clear();
+    for (auto& f : faces) {
+        outIndices.push_back(f.i0);
+        outIndices.push_back(f.i1);
+        outIndices.push_back(f.i2);
     }
 
     return true;
 }
 
-static void AddVertexData(std::vector<float>& outVerts, const float* pos, const float* normal,
-                          const float* color)
-{
-    outVerts.push_back(pos[0]);
-    outVerts.push_back(pos[1]);
-    outVerts.push_back(pos[2]);
-
-    if (normal) {
-        outVerts.push_back(normal[0]);
-        outVerts.push_back(normal[1]);
-        outVerts.push_back(normal[2]);
-    } else {
-        outVerts.push_back(0.0f);
-        outVerts.push_back(1.0f);
-        outVerts.push_back(0.0f);
-    }
-
-    if (color) {
-        outVerts.push_back(color[0]);
-        outVerts.push_back(color[1]);
-        outVerts.push_back(color[2]);
-    } else {
-        outVerts.push_back(0.7f);
-        outVerts.push_back(0.7f);
-        outVerts.push_back(0.7f);
-    }
-}
-
-static SdkMeshResult ConvertSdkMeshToResult(const std::vector<float>& positions,
-                                             const std::vector<uint32_t>& indices,
-                                             const std::vector<SdkMaterial>& materials,
-                                             const float* defaultColor)
-{
-    SdkMeshResult result;
-    const int VERTEX_STRIDE = 9;
-
-    if (positions.empty() || indices.empty()) {
-        return result;
-    }
-
-    std::vector<float> outVerts;
-    outVerts.reserve(positions.size() * 3);
-
-    std::vector<std::vector<uint32_t>> vertexFaces(positions.size() / 3);
-    std::vector<float> normalSum(positions.size(), 0.0f);
-
-    for (size_t i = 0; i < indices.size(); i += 3) {
-        if (i + 2 >= indices.size()) break;
-
-        uint32_t i0 = indices[i];
-        uint32_t i1 = indices[i + 1];
-        uint32_t i2 = indices[i + 2];
-
-        if (i0 >= positions.size() / 3 || i1 >= positions.size() / 3 || i2 >= positions.size() / 3)
-            continue;
-
-        const float* p0 = &positions[i0 * 3];
-        const float* p1 = &positions[i1 * 3];
-        const float* p2 = &positions[i2 * 3];
-
-        float e1[3] = { p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2] };
-        float e2[3] = { p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2] };
-        float n[3] = {
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0]
-        };
-        float len = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
-        if (len > 1e-8f) {
-            n[0] /= len; n[1] /= len; n[2] /= len;
-        }
-
-        vertexFaces[i0].push_back(i / 3);
-        vertexFaces[i1].push_back(i / 3);
-        vertexFaces[i2].push_back(i / 3);
-        normalSum[i0 * 3 + 0] += n[0];
-        normalSum[i0 * 3 + 1] += n[1];
-        normalSum[i0 * 3 + 2] += n[2];
-        normalSum[i1 * 3 + 0] += n[0];
-        normalSum[i1 * 3 + 1] += n[1];
-        normalSum[i1 * 3 + 2] += n[2];
-        normalSum[i2 * 3 + 0] += n[0];
-        normalSum[i2 * 3 + 1] += n[1];
-        normalSum[i2 * 3 + 2] += n[2];
-    }
-
-    for (size_t i = 0; i < positions.size() / 3; ++i) {
-        const float* pos = &positions[i * 3];
-        float* normal = &normalSum[i * 3];
-        float len = sqrtf(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
-        float n[3] = { 0.0f, 1.0f, 0.0f };
-        if (len > 1e-8f) {
-            n[0] = normal[0] / len;
-            n[1] = normal[1] / len;
-            n[2] = normal[2] / len;
-        }
-
-        float col[3] = { 0.7f, 0.7f, 0.7f };
-        if (defaultColor) {
-            col[0] = defaultColor[0];
-            col[1] = defaultColor[1];
-            col[2] = defaultColor[2];
-        }
-        if (!materials.empty()) {
-            const SdkMaterial& mat = materials[0];
-            uint32_t diff = mat.DiffuseColor[0];
-            col[0] = ((diff >> 16) & 0xFF) / 255.0f;
-            col[1] = ((diff >> 8) & 0xFF) / 255.0f;
-            col[2] = (diff & 0xFF) / 255.0f;
-        }
-
-        AddVertexData(outVerts, pos, n, col);
-    }
-
-    result.Vertices = std::move(outVerts);
-    result.Indices = indices;
-    result.VertexCount = static_cast<int>(result.Vertices.size() / VERTEX_STRIDE);
-    result.IndexCount = static_cast<int>(result.Indices.size());
-    result.Success = true;
-
-    return result;
-}
-
 bool LoadSdkMeshFile(const char* filename, SdkMeshResult& out, const float* defaultColor)
 {
     std::vector<unsigned char> fileData;
-    if (!ReadFileData(filename, fileData)) {
-        return false;
-    }
+    if (!ReadFileData(filename, fileData)) return false;
 
-    SdkMeshHeader header;
-    std::vector<SdkMesh> meshes;
-    std::vector<SdkMaterial> materials;
-    std::vector<float> positions;
+    std::vector<float> verts;
     std::vector<uint32_t> indices;
-
-    if (!ParseSdkMesh(fileData.data(), fileData.size(), header, meshes, materials,
-                      positions, indices)) {
+    if (!ParseSdkMesh(fileData.data(), fileData.size(), verts, indices, defaultColor))
         return false;
-    }
 
-    SdkMeshResult result = ConvertSdkMeshToResult(positions, indices, materials, defaultColor);
-    if (!result.Success) {
-        return false;
-    }
-
-    out = std::move(result);
+    out.Vertices = std::move(verts);
+    out.Indices = std::move(indices);
+    const int VERTEX_STRIDE = 9;
+    out.VertexCount = (int)out.Vertices.size() / VERTEX_STRIDE;
+    out.IndexCount = (int)out.Indices.size();
+    out.Success = true;
     return true;
 }
 
 bool LoadSdkMeshAsObj(const char* filename, ObjMesh& out)
 {
     SdkMeshResult result;
-    if (!LoadSdkMeshFile(filename, result)) {
-        return false;
-    }
+    if (!LoadSdkMeshFile(filename, result)) return false;
 
     out.vertices = std::move(result.Vertices);
     out.indices = std::move(result.Indices);

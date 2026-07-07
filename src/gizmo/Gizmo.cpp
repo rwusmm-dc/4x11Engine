@@ -224,7 +224,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
     std::memcpy(m_Matrix, inOutMatrix, 16*sizeof(float));
     MatMul(m_View, m_Proj, m_ViewProj);
 
-    // ---- compute bounding box center in world space ----
     float localCenter[3], localRadius;
     ComputeBB(entityVerts, vertStride, vertCount, localCenter, localRadius);
 
@@ -233,7 +232,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
     MatTransform(m_Matrix, lc, wc);
     m_Center[0] = wc[0]; m_Center[1] = wc[1]; m_Center[2] = wc[2];
 
-    // ---- gizmo world-space length from bounding box ----
     {
         float corn[4] = { localCenter[0]+localRadius,
                           localCenter[1]+localRadius,
@@ -246,7 +244,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
         m_GizmoLen = wr * 1.0f;
     }
 
-    // ---- screen-space center ----
     float cx, cy;
     if (!WorldToScreen(m_ViewProj, m_Center[0], m_Center[1], m_Center[2], cx, cy))
         return false;
@@ -255,7 +252,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
     float my = ImGui::GetMousePos().y;
     bool inside = (mx >= m_RX && mx <= m_RX+m_RW && my >= m_RY && my <= m_RY+m_RH);
 
-    // ---- axis endpoints for translate/scale lines ----
     float axes[3][3];
     float endScrX[3], endScrY[3];
     for (int i = 0; i < 3; i++) {
@@ -268,7 +264,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
         }
     }
 
-    // ---- hit test ----
     float hitR = 15.0f;
     if (!m_Using) {
         m_HovAxis = -1;
@@ -330,7 +325,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
         m_Over = (m_HovAxis >= 0);
     }
 
-    // ---- start drag ----
     if (!m_Using && m_HovAxis >= 0 && inside &&
         ImGui::IsMouseClicked(0) && !ImGui::GetIO().WantCaptureMouse) {
         m_Using = true;
@@ -367,7 +361,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
         }
     }
 
-    // ---- drag update ----
     if (m_Using) {
         if (!ImGui::IsMouseDown(0)) {
             m_Using = false;
@@ -495,7 +488,6 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
         }
     }
 
-    // ---- draw ----
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     float baseThick = 2.5f;
 
@@ -637,6 +629,17 @@ bool Gizmo::Manipulate(const float* view, const float* projection,
             dl->AddRectFilled(ImVec2(endScrX[i]-box, endScrY[i]-box),
                               ImVec2(endScrX[i]+box, endScrY[i]+box), col);
         }
+    }
+
+    // ── Center circle — grows when hovered, does nothing on click ──
+    {
+        float dx = mx - cx, dy = my - cy;
+        float dist = std::sqrt(dx*dx + dy*dy);
+        float circleR = 4.0f;
+        if (dist < circleR + 4.0f) circleR = 8.0f;
+        unsigned int circleCol = IM_COL32(180, 180, 180, 200);
+        dl->AddCircle(ImVec2(cx, cy), circleR, circleCol, 0, 2.0f);
+        dl->AddCircleFilled(ImVec2(cx, cy), circleR * 0.4f, circleCol);
     }
 
     std::memcpy(inOutMatrix, m_Matrix, 16*sizeof(float));

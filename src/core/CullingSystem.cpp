@@ -7,11 +7,7 @@
 #include <limits>
 
 using namespace DirectX;
-
-// ---------------------------------------------------------------------------
-// AABB
-// ---------------------------------------------------------------------------
-
+// some AABB
 XMFLOAT3 AABB::GetCenter() const
 {
     return XMFLOAT3(
@@ -28,18 +24,18 @@ XMFLOAT3 AABB::GetExtents() const
         (max.z - min.z) * 0.5f);
 }
 
-// ---------------------------------------------------------------------------
+//
 // Plane
-// ---------------------------------------------------------------------------
+//
 
 float Plane::DistanceToPoint(const XMFLOAT3& p) const
 {
     return v.x * p.x + v.y * p.y + v.z * p.z + v.w;
 }
 
-// ---------------------------------------------------------------------------
+//
 // Frustum
-// ---------------------------------------------------------------------------
+//
 
 void Frustum::ExtractFromMatrix(const XMMATRIX& viewProj)
 {
@@ -85,9 +81,9 @@ bool Frustum::Intersects(const AABB& box) const
     return true;
 }
 
-// ---------------------------------------------------------------------------
+//
 // World-space AABB from local AABB + world matrix
-// ---------------------------------------------------------------------------
+//
 
 static AABB TransformAABB(const AABB& local, const XMMATRIX& world)
 {
@@ -130,9 +126,9 @@ static AABB TransformAABB(const AABB& local, const XMMATRIX& world)
     return out;
 }
 
-// ---------------------------------------------------------------------------
+//
 // CullingSystem
-// ---------------------------------------------------------------------------
+//
 
 void CullingSystem::Init(void* device, void* context, bool isD3D11)
 {
@@ -260,9 +256,9 @@ void CullingSystem::RunOcclusionQueries(const std::vector<uint64_t>& ids,
     IssueOcclusionQueries(ids, matchedWorlds);
 }
 
-// ---------------------------------------------------------------------------
+//
 // D3D11 occlusion queries
-// ---------------------------------------------------------------------------
+//
 
 void CullingSystem::ResolveQueryResult(uint64_t id)
 {
@@ -382,9 +378,9 @@ void CullingSystem::IssueOcclusionQueries(const std::vector<uint64_t>& ids,
     SafeRelease(prevLayout);
 }
 
-// ---------------------------------------------------------------------------
+//
 // D3D11 proxy resource creation
-// ---------------------------------------------------------------------------
+//
 
 bool CullingSystem::CreateProxyGeometry()
 {

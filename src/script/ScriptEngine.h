@@ -15,7 +15,7 @@ extern "C" {
 
 // 4xLang v0.1 -- Scripting engine wrapping LuaJIT
 struct ScriptInstance {
-    std::string path;         // .4xs file path
+    std::string path;         // .scr / .4xs file path
     std::string source;       // raw source text
     lua_State* L = nullptr;   // dedicated Lua state per script
     bool hasError = false;
@@ -31,10 +31,10 @@ public:
 
     void SetScene(Scene* scene) { m_Scene = scene; }
 
-    // Load a .4xs script file as a ServerService script (global scope)
+    // Load a .scr / .4xs script file as a ServerService script (global scope)
     int LoadServerScript(const std::string& path);
 
-    // Load a .4xs script file as an entity-attached script
+    // Load a .scr / .4xs script file as an entity-attached script
     int LoadEntityScript(const std::string& path, uint64_t entityId);
 
     // Unload a script instance

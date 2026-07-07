@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <unordered_map>
 #include <sys/stat.h>
 
 extern "C" {
@@ -11,8 +12,6 @@ extern "C" {
 }
 
 using namespace DirectX;
-
-// ---- gaf serialization helpers ----
 
 struct WriteBuf {
     std::vector<uint8_t> buf;
@@ -76,6 +75,8 @@ static void serialize_entity(WriteBuf& w, const Entity& e) {
     w.put((uint8_t)(e.worldEnv.shadowsEnabled ? 1 : 0));
     w.put((uint8_t)(e.worldEnv.volumetricLighting ? 1 : 0));
     w.put(e.worldEnv.lightIntensity);
+
+    w.put((uint8_t)(e.HasFlag(ENTITY_MODEL) ? 1 : 0));
 }
 
 struct ReadBuf {
@@ -193,6 +194,12 @@ static bool deserialize_entity(ReadBuf& r, Entity& e, uint32_t version = 1) {
         if (!r.get(e.worldEnv.lightIntensity)) return false;
     }
 
+    if (version >= 3) {
+        uint8_t ismdl;
+        if (!r.get(ismdl)) return false;
+        if (ismdl) e.SetFlag(ENTITY_MODEL);
+    }
+
     e.meshDirty = true;
     return true;
 }
@@ -207,7 +214,7 @@ bool WriteGAF(const char* path, const std::vector<Entity>& entities) {
     FILE* f = fopen(path, "wb");
     if (!f) return false;
     GAFHeader hdr;
-    hdr.version = 2;
+    hdr.version = 3;
     hdr.entityCount = count;
     hdr.dataSize = w.buf.size();
     fwrite(&hdr, sizeof(hdr), 1, f);
@@ -277,21 +284,18 @@ bool LoadEntitiesFromArchive(GameArchive& archive, std::vector<Entity>& entities
     const auto& index = archive.GetIndex();
     if (index.empty()) return false;
 
-    // Group entities by block index
+    // Group entities by block index (O(N) with unordered_map)
     struct Group { int blockIdx; std::vector<size_t> entries; };
+    std::unordered_map<uint32_t, std::vector<size_t>> groupMap;
+    for (size_t i = 0; i < index.size(); i++)
+        groupMap[index[i].blockIndex].push_back(i);
     std::vector<Group> groups;
-    for (size_t i = 0; i < index.size(); i++) {
-        uint32_t bidx = index[i].blockIndex;
-        bool found = false;
-        for (auto& g : groups) {
-            if (g.blockIdx == (int)bidx) { g.entries.push_back(i); found = true; break; }
-        }
-        if (!found) {
-            Group g;
-            g.blockIdx = (int)bidx;
-            g.entries.push_back(i);
-            groups.push_back(std::move(g));
-        }
+    groups.reserve(groupMap.size());
+    for (auto& kv : groupMap) {
+        Group g;
+        g.blockIdx = (int)kv.first;
+        g.entries = std::move(kv.second);
+        groups.push_back(std::move(g));
     }
 
     for (auto& group : groups) {
@@ -307,7 +311,7 @@ bool LoadEntitiesFromArchive(GameArchive& archive, std::vector<Entity>& entities
             if (entry.offsetInBlock + entry.size > (uint32_t)blockData.size()) return false;
             ReadBuf er(blockData.data() + entry.offsetInBlock, entry.size);
             Entity e(0, "");
-            if (!deserialize_entity(er, e, 2)) return false;
+            if (!deserialize_entity(er, e, 3)) return false;
             entities.push_back(std::move(e));
         }
     }
@@ -441,8 +445,6 @@ bool ExportArchive(const char* outputDir, const std::vector<Entity>& entities) {
     return true;
 }
 #endif // EDITOR_BUILD
-
-// ---- scene ----
 
 Scene::Scene()  { InitializeCriticalSection(&m_Lock); }
 Scene::~Scene() { DeleteCriticalSection(&m_Lock); }

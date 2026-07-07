@@ -16,10 +16,17 @@ namespace {
 ComPtr<ID3D10RasterizerState>   g_RS;
 ComPtr<ID3D10DepthStencilState> g_DSState;
 ComPtr<ID3D10VertexShader>      g_VS;
+ComPtr<ID3D10VertexShader>      g_VSInstanced;
 ComPtr<ID3D10PixelShader>       g_PS;
 ComPtr<ID3D10InputLayout>       g_Layout;
+ComPtr<ID3D10InputLayout>       g_LayoutInstanced;
 ComPtr<ID3D10Buffer>            g_CB;
 ComPtr<ID3D10Buffer>            g_LightCB;
+
+// Instancing state
+ComPtr<ID3D10Buffer>                g_InstanceBuf;
+ComPtr<ID3D10ShaderResourceView>    g_InstanceSRV;
+int                                 g_InstanceCapacity = 0;
 
 XMMATRIX g_View;
 XMMATRIX g_Proj;
@@ -46,6 +53,7 @@ static void ThrowIfFailed(HRESULT hr, const char* msg)
 }
 
 static const char* g_HLSL = R"HLSL(
+StructuredBuffer<float4x4> InstanceWorlds : register(t0);
 cbuffer PerFrame : register(b0)
 {
     float4x4 gWorld;
@@ -70,6 +78,17 @@ PSIn VSMain(VSIn v)
     float4 wp = mul(float4(v.pos, 1.0f), gWorld);
     o.pos = mul(wp, gViewProj);
     o.normal = mul(v.nrm, (float3x3)gWorld);
+    o.worldPos = wp.xyz;
+    o.col = v.col;
+    return o;
+}
+PSIn VSMainInstanced(VSIn v, uint instanceId : SV_InstanceID)
+{
+    PSIn o;
+    float4x4 instWorld = InstanceWorlds[instanceId];
+    float4 wp = mul(float4(v.pos, 1.0f), instWorld);
+    o.pos = mul(wp, gViewProj);
+    o.normal = mul(v.nrm, (float3x3)instWorld);
     o.worldPos = wp.xyz;
     o.col = v.col;
     return o;
@@ -157,15 +176,19 @@ bool Init(int, int)
         return true;
     };
 
-    ComPtr<ID3D10Blob> vsBlob, psBlob;
+    ComPtr<ID3D10Blob> vsBlob, vsInstBlob, psBlob;
 
     if (!CompileShader(g_HLSL, "vs_4_0", "VSMain", vsBlob) ||
+        !CompileShader(g_HLSL, "vs_4_0", "VSMainInstanced", vsInstBlob) ||
         !CompileShader(g_HLSL, "ps_4_0", "PSMain", psBlob))
         return false;
 
     ThrowIfFailed(dev->CreateVertexShader(
         vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), g_VS.addr()),
         "CreateVertexShader failed");
+    ThrowIfFailed(dev->CreateVertexShader(
+        vsInstBlob->GetBufferPointer(), vsInstBlob->GetBufferSize(), g_VSInstanced.addr()),
+        "CreateVertexShader instanced failed");
     ThrowIfFailed(dev->CreatePixelShader(
         psBlob->GetBufferPointer(), psBlob->GetBufferSize(), g_PS.addr()),
         "CreatePixelShader failed");
@@ -180,6 +203,11 @@ bool Init(int, int)
         vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
         g_Layout.addr()),
         "CreateInputLayout failed");
+    ThrowIfFailed(dev->CreateInputLayout(
+        elems, 3,
+        vsInstBlob->GetBufferPointer(), vsInstBlob->GetBufferSize(),
+        g_LayoutInstanced.addr()),
+        "CreateInputLayout instanced failed");
 
     D3D10_BUFFER_DESC bd = {};
     bd.ByteWidth            = sizeof(XMFLOAT4X4) * 2;
@@ -222,10 +250,14 @@ bool Init(int, int)
 void Shutdown()
 {
     g_MeshCache.clear();
+    g_InstanceSRV.release();
+    g_InstanceBuf.release();
     g_LightCB.release();
     g_CB.release();
+    g_LayoutInstanced.release();
     g_Layout.release();
     g_PS.release();
+    g_VSInstanced.release();
     g_VS.release();
     g_DSState.release();
     g_RS.release();
@@ -272,7 +304,7 @@ void DrawEntity(uint64_t entityId, XMMATRIX world,
     if (!dev) return;
 
     CachedMesh* cache = FindCachedMesh(entityId);
-    bool needsNew = meshDirty || !cache;
+    bool needsNew = meshDirty || !cache || (cache && !cache->vb.get());
 
     if (needsNew) {
         if (cache) {
@@ -290,7 +322,10 @@ void DrawEntity(uint64_t entityId, XMMATRIX world,
         bd.BindFlags  = D3D10_BIND_VERTEX_BUFFER;
         D3D10_SUBRESOURCE_DATA init = {};
         init.pSysMem  = verts;
-        if (FAILED(dev->CreateBuffer(&bd, &init, cache->vb.addr()))) return;
+        if (FAILED(dev->CreateBuffer(&bd, &init, cache->vb.addr()))) {
+            RemoveEntityMesh(entityId);
+            return;
+        }
 
         DXGI_FORMAT fmt = DXGI_FORMAT_R16_UINT;
         if (indexCount > 65535) {
@@ -302,6 +337,7 @@ void DrawEntity(uint64_t entityId, XMMATRIX world,
             init.pSysMem  = indices;
             if (FAILED(dev->CreateBuffer(&bd, &init, cache->ib.addr()))) {
                 cache->vb.release();
+                RemoveEntityMesh(entityId);
                 return;
             }
             fmt = DXGI_FORMAT_R32_UINT;
@@ -318,6 +354,7 @@ void DrawEntity(uint64_t entityId, XMMATRIX world,
             init.pSysMem  = idx16.data();
             if (FAILED(dev->CreateBuffer(&bd, &init, cache->ib.addr()))) {
                 cache->vb.release();
+                RemoveEntityMesh(entityId);
                 return;
             }
         }
@@ -326,6 +363,8 @@ void DrawEntity(uint64_t entityId, XMMATRIX world,
         cache->idxFmt     = fmt;
         cache->vertCount  = vertCount;
     }
+
+    if (!cache->vb.get() || !cache->ib.get()) return;
 
     struct { XMFLOAT4X4 world; XMFLOAT4X4 viewProj; } cbData;
     XMStoreFloat4x4(&cbData.world, XMMatrixTranspose(world));
@@ -349,6 +388,17 @@ void DrawEntity(uint64_t entityId, XMMATRIX world,
     g_DrawCalls++;
 }
 
+void DrawEntityInstanced(uint64_t entityId,
+                const XMMATRIX* worlds, int instanceCount,
+                const float* verts, int vertCount,
+                const uint32_t* indices, int indexCount,
+                bool meshDirty)
+{
+    // D3D10 lacks structured buffer support; draw non-instanced as fallback.
+    for (int i = 0; i < instanceCount; i++)
+        DrawEntity(entityId, worlds[i], verts, vertCount, indices, indexCount, i == 0 ? meshDirty : false);
+}
+
 void RemoveEntityMesh(uint64_t entityId)
 {
     for (size_t i = 0; i < g_MeshCache.size(); i++) {
@@ -370,4 +420,4 @@ int DrawCallCount()
 }
 
 } // namespace Pipeline
-} // namespace d3d10
+}

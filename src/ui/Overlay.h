@@ -1,3 +1,7 @@
+// ImGui ID stack notes:
+// - Every PushID() needs a matching PopID() - no early returns/continues between them.
+// - TreeNodeEx() with Leaf|NoTreePushOnOpen does NOT push; do NOT call TreePop() for it.
+// - TreeNodeEx() without that flag pushes only when node is open; call TreePop() only in that case.
 #pragma once
 #include <windows.h>
 #include <cstdint>
@@ -18,7 +22,7 @@ void ShowHierarchyWindow(Scene& scene, uint64_t& selectedEntity, bool& deselect)
 bool ShowPropertiesWindow(Entity* entity, Scene& scene);
 void ShowEditorWindow(Scene& scene, Entity* entity);
 void ShowServerServiceWindow(Scene& scene);
-void ShowGizmo(const float* view, const float* projection, Entity* entity);
+    void ShowGizmo(const float* view, const float* projection, Entity* entity, Scene& scene);
 void DrawLightIcons(Scene& scene, const float* view, const float* projection, int viewportW, int viewportH);
 void DrawCameraIcons(Scene& scene, const float* view, const float* projection, int viewportW, int viewportH);
 bool IsGizmoOver();
@@ -31,7 +35,13 @@ extern bool g_ShowEditor;
 extern std::string g_EditorPath;
 extern uint64_t g_EditingEntity;
 
-// Debug console
 void ShowDebugConsole(bool* pOpen);
+
+// ── Docking ──
+void BeginDockspace();
+void EndDockspace();
+
+// ── Directory Manager (docked at bottom) ──
+void ShowDirectoryManagerWindow();
 
 } // namespace Overlay

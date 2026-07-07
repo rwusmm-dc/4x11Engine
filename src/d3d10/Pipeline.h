@@ -31,6 +31,11 @@ void DrawEntity(uint64_t entityId, DirectX::XMMATRIX world,
                 const float* verts, int vertCount,
                 const uint32_t* indices, int indexCount,
                 bool meshDirty);
+void DrawEntityInstanced(uint64_t entityId,
+                const DirectX::XMMATRIX* worlds, int instanceCount,
+                const float* verts, int vertCount,
+                const uint32_t* indices, int indexCount,
+                bool meshDirty);
 void RemoveEntityMesh(uint64_t entityId);
 int DrawCallCount();
 

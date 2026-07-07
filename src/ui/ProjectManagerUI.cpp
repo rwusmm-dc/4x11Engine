@@ -1,3 +1,7 @@
+// ImGui ID stack notes:
+// - Every PushID() needs a matching PopID() - no early returns/continues between them.
+// - TreeNodeEx() with Leaf|NoTreePushOnOpen does NOT push; do NOT call TreePop() for it.
+// - TreeNodeEx() without that flag pushes only when node is open; call TreePop() only in that case.
 #include "ProjectManagerUI.h"
 #include "core/Window.h"
 #include "core/Project.h"
