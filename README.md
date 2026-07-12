@@ -2,6 +2,9 @@
 
 A lightweight game engine and editor supporting Direct3D 10 and 11, developed as an experiment in AI-assisted software development.
 
+<img width="1365" height="697" alt="image" src="https://github.com/user-attachments/assets/20e1dc50-f60a-4802-a87a-3559eb34016b" />
+
+
 ## Overview
 
 4x11Engine is a complete game development framework featuring:
