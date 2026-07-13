@@ -72,8 +72,8 @@ if not exist LuaJIT\src\libluajit.a (
     echo LuaJIT library already built, skipping...
 )
 
-set "INCS=-Isrc -Iimgui -Iimgui/backends -Izstd/include -ILuaJIT/src -Ibullet3/src"
-set "LIBS=-L. -lzstd -LLuaJIT/src -lluajit"
+set "INCS=-Isrc -Iimgui -Iimgui/backends -Izstd/include -Izstd/lib -ILuaJIT/src -Ibullet3/src"
+set "LIBS=-L. -Lzstd/lib -lzstd -LLuaJIT/src -lluajit"
 
 set "CFLAGS_BASE=-std=c++17 -mwindows %MARCH% %OPTFLAGS% -DEDITOR_BUILD"
 if "%WARNINGS%"=="1" (
@@ -165,7 +165,7 @@ if exist main.exe (echo === Built main.exe ===) & dir main.exe
 
 echo.
 echo === Building PackAssets.exe ===
-"%GCC%" -std=c++17 -O2 -Izstd/include tools/PackAssets.cpp -o PackAssets.exe -L. -lzstd -static-libgcc -static-libstdc++ -ldbghelp -lpsapi
+"%GCC%" -std=c++17 -O2 -Izstd/include -Izstd/lib tools/PackAssets.cpp -o PackAssets.exe -L. -Lzstd/lib -lzstd -static-libgcc -static-libstdc++ -ldbghelp -lpsapi
 if errorlevel 1 (
     echo [FAILED] Building PackAssets.exe
     exit /b 1

@@ -35,8 +35,8 @@ if not exist "LuaJIT\src\libluajit.a" (
     if errorlevel 1 exit /b 1
 )
 
-set "INCS=-Isrc -Iimgui -Iimgui/backends -Izstd/include -ILuaJIT/src -Ibullet3/src"
-set "LIBS=-L. -lzstd -LLuaJIT/src -lluajit"
+set "INCS=-Isrc -Iimgui -Iimgui/backends -Izstd/include -Izstd/lib -ILuaJIT/src -Ibullet3/src"
+set "LIBS=-L. -Lzstd/lib -lzstd -LLuaJIT/src -lluajit"
 set "CFLAGS_BASE=-std=c++17 -mwindows %MARCH% %OPTFLAGS%"
 if "%WARNINGS%"=="1" (
     set "CFLAGS=%CFLAGS_BASE% -Wall -Wextra -Wno-unused-parameter"
