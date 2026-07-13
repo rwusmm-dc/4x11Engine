@@ -10,6 +10,7 @@ Debug/
 Release/
 x64/
 x86/
+build_cmake/
 
 # Compiled object files
 *.o

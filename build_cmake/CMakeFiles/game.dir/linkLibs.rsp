@@ -1,1 +1,0 @@
- C:/Users/cristi/Desktop/4x11Engine/libzstd.dll C:/Users/cristi/Desktop/4x11Engine/LuaJIT/src/libluajit.a -ld3d10 -ld3d11 -ld3dcompiler -ldxgi -luser32 -lkernel32 -ldwmapi -lcomdlg32 -luuid -lole32 -lshell32 -ldbghelp -lpsapi -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 
