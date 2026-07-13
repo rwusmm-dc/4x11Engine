@@ -1,0 +1,3 @@
+"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\PackAssets.dir/objects.a
+C:\TDM-GCC-64\bin\ar.exe qc CMakeFiles\PackAssets.dir/objects.a @CMakeFiles\PackAssets.dir\objects1.rsp
+C:\TDM-GCC-64\bin\g++.exe -O3 -DNDEBUG -static-libgcc -static-libstdc++ -Wl,--whole-archive CMakeFiles\PackAssets.dir/objects.a -Wl,--no-whole-archive -o C:\Users\cristi\Desktop\4x11Engine\PackAssets.exe -Wl,--out-implib,libPackAssets.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\PackAssets.dir\linkLibs.rsp
